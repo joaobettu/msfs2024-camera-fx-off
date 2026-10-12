@@ -8,11 +8,14 @@ Runs at below-normal priority, which the compiler processes inherit, so a runnin
 #>
 param(
   [switch]$Tests,
-  # ReShade with full add-on support, copied next to the fixture (only read).
-  [string]$ReShadeDll = 'D:\SteamLibrary\steamapps\common\Limitless\dxgi.dll'
+  # ReShade with full add-on support, copied next to the fixture (only read). By default, the dxgi.dll in the game folder,
+  # which is found in the Steam libraries unless -GamePath gives it.
+  [string]$ReShadeDll = '',
+  [string]$GamePath = ''
 )
 $ErrorActionPreference = 'Stop'
 (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
+. (Join-Path $PSScriptRoot 'find-game.ps1')
 
 $root = Split-Path $PSScriptRoot
 $build = Join-Path $root 'build'
@@ -71,6 +74,10 @@ Invoke-Tool 'cl' ($common + @("/Fo$obj\classify_test.obj", "/Fd$obj\classify_tes
 Invoke-Tool 'cl' ($common + @("/I$gen", "/Fo$obj\fixture.obj", "/Fd$obj\fixture_cl.pdb", "$root\tests\fixture.cpp", "/Fe$fixtureDir\fixture.exe", '/link', 'd3d12.lib', 'dxgi.lib'))
 
 # The fixture runs inside a real ReShade: a copy of its dxgi.dll, a minimal ReShade.ini (no effects, no update check) and the add-on.
+if (-not $ReShadeDll) {
+  if (-not $GamePath) { $GamePath = Find-GamePath }
+  $ReShadeDll = Join-Path $GamePath 'dxgi.dll'
+}
 Copy-Item -LiteralPath $ReShadeDll -Destination "$fixtureDir\dxgi.dll" -Force
 Copy-Item -LiteralPath "$build\msfs2024-camera-fx-off.addon64" -Destination $fixtureDir -Force
 [IO.File]::WriteAllLines("$fixtureDir\ReShade.ini", @(

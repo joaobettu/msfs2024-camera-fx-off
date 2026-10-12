@@ -101,11 +101,13 @@ The lens flare is recognized from the context of each draw, not by shader hash, 
 
 Its three parts, though, are told apart by their shaders. If an update changes those shaders, the add-on falls back to the order the engine draws them in: the glow first, then the star rays, then the ghosts. The log says when that happens ("has shaders this version does not know"). If the parts come out wrong after an update, please open an issue.
 
-The bloom removal depends on a table of pairs made for the current shader package. If the sim updates, the log and the overlay say so, and bloom simply stays on. To regenerate the table, run this from the source folder (pass `-GamePath` if the game is not in `D:\SteamLibrary\steamapps\common\Limitless`):
+The bloom removal depends on a table of pairs made for the current shader package. If the sim updates, the log and the overlay say so, and bloom simply stays on. To regenerate the table, run this from the source folder:
 
 ```
-powershell -ExecutionPolicy Bypass -File tools\gen_twins.ps1 -GamePath "<game folder>"
+powershell -ExecutionPolicy Bypass -File tools\gen_twins.ps1
 ```
+
+The script finds the Steam version of the game on its own. For other installs, add `-GamePath "<folder that holds FlightSimulator2024.exe>"`.
 
 Then copy the new `build\msfs2024-camera-fx-off.twins` into the game folder. The tool only reads the game files, and it refuses to write the table if any pair is ambiguous.
 
@@ -146,10 +148,7 @@ powershell -ExecutionPolicy Bypass -File tools\gen_twins.ps1
 powershell -ExecutionPolicy Bypass -File scripts\test.ps1
 ```
 
-The scripts default to the game in `D:\SteamLibrary\steamapps\common\Limitless`. If yours is elsewhere, pass:
-
-- `-GamePath` to `gen_twins.ps1` and `test.ps1`;
-- `-ReShadeDll` (the path of ReShade's `dxgi.dll`) to `build.ps1`.
+The scripts look for the game in your Steam libraries. For other installs (such as the Microsoft Store version), pass `-GamePath` with the folder that holds `FlightSimulator2024.exe`. `build.ps1` also takes `-ReShadeDll`, the path of ReShade's `dxgi.dll`, which otherwise comes from the game folder.
 
 What the tests cover:
 
