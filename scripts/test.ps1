@@ -44,5 +44,17 @@ foreach ($run in @(
   if ($LASTEXITCODE -ne 0) { $failed++ }
 }
 
+# The default lookup players rely on: the shader package in the Shaders folder next to the executable, no pak_path in
+# the settings, from a folder whose path has spaces and accents ("ção", written as code points: this file has no BOM).
+$elsewhere = Join-Path $build "fixture elsewhere $([char]0x00E7)$([char]0x00E3)o"
+New-Item -ItemType Directory -Force $elsewhere | Out-Null
+foreach ($file in 'fixture.exe', 'dxgi.dll', 'ReShade.ini', 'msfs2024-camera-fx-off.addon64') {
+  Copy-Item -LiteralPath (Join-Path "$build\fixture" $file) -Destination $elsewhere -Force
+}
+$arguments = @($adapter) + @('--sun-flare-off=1', '--bloom-off=1', '--pak-next-to-exe')
+Write-Host "== fixture (in '$elsewhere') $($arguments -join ' ')"
+& (Join-Path $elsewhere 'fixture.exe') @arguments
+if ($LASTEXITCODE -ne 0) { $failed++ }
+
 if ($failed -ne 0) { Write-Host "$failed test run(s) failed"; exit 1 }
 Write-Host 'all tests passed'

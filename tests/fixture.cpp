@@ -3,6 +3,9 @@
 // draws stand-ins of the MSFS shaders and reads the pixels back.
 //   fixture [--adapter=gpu] --sun-flare-off=1 --bloom-off=1 [--keep-glow=1 --keep-star=0 --keep-ghosts=0]
 //       stand-in shader package with a no-bloom twin: checks the twin swap. Keep settings left out use the add-on defaults.
+//   fixture [--adapter=gpu] --pak-next-to-exe ...
+//       the stand-in shader package in a Shaders folder next to this executable and no pak_path in the settings: the
+//       add-on's default lookup, as players have it with the game
 //   fixture [--adapter=gpu] --real-pak=<SHADERSPAK.*.SM6.PC.PAK> --real-twins=<.twins> ...
 //       the game's shader package and twins file: also builds a pipeline from the game's own bloom tonemapping shader and
 //       checks the add-on creates the real no-bloom twin (pipeline only, never drawn)
@@ -186,7 +189,7 @@ int wmain(int argc, wchar_t **argv)
 {
 	// Keep settings at -1 are left out of the .ini, so the add-on uses its defaults.
 	int sun_flare_off = 1, bloom_off = 1, keep_glow = -1, keep_star = -1, keep_ghosts = -1;
-	bool gpu = false;
+	bool gpu = false, pak_next_to_exe = false;
 	std::wstring real_pak, real_twins;
 	for (int i = 1; i < argc; ++i)
 	{
@@ -198,6 +201,8 @@ int wmain(int argc, wchar_t **argv)
 		swscanf_s(argv[i], L"--keep-ghosts=%d", &keep_ghosts);
 		if (arg == L"--adapter=gpu")
 			gpu = true;
+		if (arg == L"--pak-next-to-exe")
+			pak_next_to_exe = true;
 		if (arg.rfind(L"--real-pak=", 0) == 0)
 			real_pak = arg.substr(11);
 		if (arg.rfind(L"--real-twins=", 0) == 0)
@@ -206,9 +211,10 @@ int wmain(int argc, wchar_t **argv)
 	const bool real = !real_pak.empty();
 	// What the add-on should use: only the glow is kept by default.
 	const bool glow_kept = keep_glow != 0, star_kept = keep_star > 0, ghosts_kept = keep_ghosts > 0;
-	printf("fixture: %s, sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d%s bloom_off=%d%s\n",
+	printf("fixture: %s, sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d%s bloom_off=%d%s%s\n",
 		gpu ? "GPU" : "WARP", sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept),
-		keep_glow < 0 && keep_star < 0 && keep_ghosts < 0 ? " (defaults)" : "", bloom_off, real ? ", game shaders" : "");
+		keep_glow < 0 && keep_star < 0 && keep_ghosts < 0 ? " (defaults)" : "", bloom_off, real ? ", game shaders" : "",
+		pak_next_to_exe ? ", shader package in Shaders next to the executable" : "");
 
 	// Add-on inputs, written before ReShade loads it.
 	const std::wstring dir = exe_directory();
@@ -226,7 +232,9 @@ int wmain(int argc, wchar_t **argv)
 	}
 	else
 	{
-		pak_path = dir + L"fixture.pak";
+		if (pak_next_to_exe)
+			CreateDirectoryW((dir + L"Shaders").c_str(), nullptr);
+		pak_path = dir + (pak_next_to_exe ? L"Shaders\\fixture.pak" : L"fixture.pak");
 		constexpr uint32_t twin_offset = 4096;
 		std::vector<unsigned char> pak(twin_offset, 0xCD);
 		pak.insert(pak.end(), g_ps_tonemap_plain, g_ps_tonemap_plain + container_size(g_ps_tonemap_plain));
@@ -239,7 +247,9 @@ int wmain(int argc, wchar_t **argv)
 
 	// Keys of earlier versions are in there too, and must do nothing (light_glow_off used to hide the lights).
 	std::string ini = "[settings]\r\nsun_flare_off=" + std::to_string(sun_flare_off) + "\r\nbloom_off=" + std::to_string(bloom_off) +
-		"\r\npak_path=" + narrow(pak_path) + "\r\nlight_glow_off=1\r\nlight_point_off=1\r\nflare_keep=" + digest_hex(g_vs_material).substr(0, 8) + ":" + digest_hex(g_ps_material_c).substr(0, 8) + "\r\n";
+		"\r\nlight_glow_off=1\r\nlight_point_off=1\r\nflare_keep=" + digest_hex(g_vs_material).substr(0, 8) + ":" + digest_hex(g_ps_material_c).substr(0, 8) + "\r\n";
+	if (!pak_next_to_exe)
+		ini += "pak_path=" + narrow(pak_path) + "\r\n";
 	if (keep_glow >= 0)
 		ini += "keep_glow=" + std::to_string(keep_glow) + "\r\n";
 	if (keep_star >= 0)
