@@ -1,0 +1,5 @@
+# Normalize line endings in the repository.
+* text=auto
+
+# Third-party headers: left out of GitHub's language statistics.
+third_party/** linguist-vendored
