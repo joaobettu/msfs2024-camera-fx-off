@@ -1,7 +1,7 @@
 // MSFS 2024 Camera FX Off, by PdPanoo
 // ReShade add-on that removes the "filmed with a camera" look from Microsoft Flight Simulator 2024:
 // - the lens flare, by skipping the quads the game draws for it right after upscaling; its glow, star rays and ghosts can
-//   each be kept from the overlay (by default the glow around the sun is);
+//   each be kept from the overlay (none is by default);
 // - bloom and its lens dirt, by binding the game's own tonemapping permutation without bloom in place of the one with it.
 // It only uses ReShade events: no hooks of its own, and little per-call work (a lock-free table lookup on pipeline binds,
 // a view format lookup on render target binds without depth).
@@ -40,8 +40,8 @@ namespace
 	// Settings, stored in msfs2024-camera-fx-off.ini next to the add-on
 
 	std::atomic<bool> g_sun_flare_off { true };
-	// Parts of the lens flare still drawn with its removal on, by camfx::flare_part: only the glow by default.
-	std::atomic<bool> g_keep[camfx::flare_part_count] = { true, false, false };
+	// Parts of the lens flare still drawn with its removal on, by camfx::flare_part: none by default.
+	std::atomic<bool> g_keep[camfx::flare_part_count] = { false, false, false };
 	const wchar_t *const g_keep_keys[camfx::flare_part_count] = { L"keep_glow", L"keep_star", L"keep_ghosts" };
 	std::atomic<bool> g_bloom_off { true };
 	// Pressed together with Ctrl+Shift
@@ -77,7 +77,7 @@ namespace
 		const auto get = [](const wchar_t *key, int def) { return int(GetPrivateProfileIntW(L"settings", key, def, g_ini_path.c_str())); };
 		g_sun_flare_off = get(L"sun_flare_off", 1) != 0;
 		for (size_t i = 0; i < camfx::flare_part_count; ++i)
-			g_keep[i] = get(g_keep_keys[i], i == size_t(flare_part::glow)) != 0;
+			g_keep[i] = get(g_keep_keys[i], 0) != 0;
 		g_bloom_off = get(L"bloom_off", 1) != 0;
 		g_key_flare = UINT(get(L"key_flare", VK_F5));
 		g_key_bloom = UINT(get(L"key_bloom", VK_F6));

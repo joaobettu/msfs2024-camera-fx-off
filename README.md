@@ -7,7 +7,7 @@ By **PdPanoo**
 
 A ReShade add-on that removes the "filmed with a camera" look from Microsoft Flight Simulator 2024:
 
-- **Lens flare:** the star rays and lens ghosts the game draws when the sun is on screen go away. The glow around the sun stays by default, and each of the three parts can be kept or removed from the overlay.
+- **Lens flare:** the glow, the star rays and the lens ghosts the game draws when the sun is on screen go away. Each of the three parts can be kept from the overlay; keeping the glow around the sun, for example, keeps the sun at noon from being just a white dot.
 - **Bloom and lens dirt:** tonemapping uses the game's own permutation **without bloom**, the same one the engine would use with bloom turned off. Lens dirt only exists together with bloom, so it goes away too.
 
 City, airport and aircraft lights are left alone.
@@ -57,7 +57,7 @@ The sim's lens flare has three parts. Under the lens flare option, the overlay h
 
 | Part | Kept by default | What it is |
 |---|---|---|
-| Glow around the sun | yes | the soft halo around the sun, without which the sun at noon is just a white dot |
+| Glow around the sun | no | the soft halo around the sun, without which the sun at noon is just a white dot |
 | Star rays | no | the star-shaped rays on the sun |
 | Lens ghosts | no | the reflections of the lens along the line from the sun through the center of the screen |
 
@@ -72,7 +72,7 @@ Your choices are saved in `msfs2024-camera-fx-off.ini`, next to the add-on, in t
 | Key | Default | Meaning |
 |---|---|---|
 | `sun_flare_off` | `1` | remove the lens flare |
-| `keep_glow`, `keep_star`, `keep_ghosts` | `1`, `0`, `0` | parts of the lens flare to keep while it is removed |
+| `keep_glow`, `keep_star`, `keep_ghosts` | `0`, `0`, `0` | parts of the lens flare to keep while it is removed |
 | `bloom_off` | `1` | remove bloom and lens dirt |
 | `key_flare`, `key_bloom`, `key_trace` | `116`, `117`, `118` (F5, F6, F7) | shortcut keys, pressed with Ctrl+Shift, as Windows virtual-key codes |
 | `pak_path` | (empty) | full path of the game's `SHADERSPAK.*.SM6.PC.PAK`, if it is not in the `Shaders` folder next to the game executable |

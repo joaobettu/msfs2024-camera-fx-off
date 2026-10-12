@@ -51,7 +51,7 @@ New-Item -ItemType Directory -Force $elsewhere | Out-Null
 foreach ($file in 'fixture.exe', 'dxgi.dll', 'ReShade.ini', 'msfs2024-camera-fx-off.addon64') {
   Copy-Item -LiteralPath (Join-Path "$build\fixture" $file) -Destination $elsewhere -Force
 }
-$arguments = @($adapter) + @('--sun-flare-off=1', '--bloom-off=1', '--pak-next-to-exe')
+$arguments = @($adapter) + @('--sun-flare-off=1', '--bloom-off=1', '--keep-glow=1', '--pak-next-to-exe')
 Write-Host "== fixture (in '$elsewhere') $($arguments -join ' ')"
 & (Join-Path $elsewhere 'fixture.exe') @arguments
 if ($LASTEXITCODE -ne 0) { $failed++ }

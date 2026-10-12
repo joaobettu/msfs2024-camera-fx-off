@@ -31,7 +31,7 @@ body:
     attributes:
       label: Add-on version
       description: The version in the ReShade overlay's Add-ons tab, or in the first line of the log.
-      placeholder: "0.4.1"
+      placeholder: "0.4.2"
     validations:
       required: true
   - type: input

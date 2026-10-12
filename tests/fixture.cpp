@@ -209,8 +209,8 @@ int wmain(int argc, wchar_t **argv)
 			real_twins = arg.substr(13);
 	}
 	const bool real = !real_pak.empty();
-	// What the add-on should use: only the glow is kept by default.
-	const bool glow_kept = keep_glow != 0, star_kept = keep_star > 0, ghosts_kept = keep_ghosts > 0;
+	// What the add-on should use: no part of the lens flare is kept by default.
+	const bool glow_kept = keep_glow > 0, star_kept = keep_star > 0, ghosts_kept = keep_ghosts > 0;
 	printf("fixture: %s, sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d%s bloom_off=%d%s%s\n",
 		gpu ? "GPU" : "WARP", sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept),
 		keep_glow < 0 && keep_star < 0 && keep_ghosts < 0 ? " (defaults)" : "", bloom_off, real ? ", game shaders" : "",
@@ -606,7 +606,7 @@ int wmain(int argc, wchar_t **argv)
 	char settings[96];
 	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d bloom_off=%d ",
 		sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept), bloom_off);
-	check(log.find(settings) != std::string::npos, "add-on read the settings (only the glow kept unless set otherwise)");
+	check(log.find(settings) != std::string::npos, "add-on read the settings (no lens flare part kept unless set otherwise)");
 	// The stand-in elements are not in the add-on's table of known shaders, so it goes by draw order.
 	const auto element = [&](const unsigned char *ps, const char *part) {
 		const std::string line = log_line(log, "VS:vh_base#" + digest_hex(g_vs_material).substr(0, 8) + " PS:ph_base#" + digest_hex(ps).substr(0, 8) + " has shaders this version does not know");
