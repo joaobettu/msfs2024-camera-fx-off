@@ -1,5 +1,6 @@
 // Offline checks against the game's real shader package (opened read-only):
-// - the add-on recognizes exactly the expected flare, light and bloom tonemapping shaders;
+// - the add-on recognizes exactly the expected bloom tonemapping shaders, and the lens flare elements of its table are
+//   in the package, as material pipelines;
 // - every bloom permutation has a twin in the .twins file, and each twin is the matching permutation without bloom;
 // - the parsers never read out of bounds on corrupted bytecode (inputs end right before an inaccessible page).
 #include "../src/classify.hpp"
@@ -7,6 +8,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <iterator>
+#include <map>
 #include <random>
 #include <set>
 #include <string>
@@ -72,6 +75,13 @@ namespace
 		return result;
 	}
 
+	uint32_t container_size_of(const uint8_t *code)
+	{
+		uint32_t size;
+		std::memcpy(&size, code + 24, 4);
+		return size;
+	}
+
 	camfx::digest16 digest_of(const uint8_t *code, size_t size)
 	{
 		camfx::digest16 d;
@@ -124,7 +134,7 @@ namespace
 
 	int run_parsers(const uint8_t *code, size_t size)
 	{
-		int sink = int(camfx::classify_vertex_shader(code, size)) + int(camfx::classify_pixel_shader(code, size)) + int(camfx::entry_point(code, size).size());
+		int sink = int(camfx::classify_pipeline(code, size, code, size)) + int(camfx::entry_point(code, size).size()) + int(camfx::digest_prefix(code, size) & 0xff);
 		uint8_t d[16];
 		sink += dxbc::digest(code, size, d) ? d[0] : 0;
 		return sink;
@@ -162,41 +172,63 @@ int wmain(int argc, wchar_t **argv)
 	const std::vector<container> containers = find_containers(pak);
 	printf("%zu shader containers in %S\n", containers.size(), pak_path.c_str());
 
-	size_t billboard = 0, tonemap = 0, counts[camfx::pso_kind_count] = {};
-	std::set<std::string> glow_digests;
+	// The lens flare elements the add-on knows: vertex and pixel shader digest prefixes, and the part each one draws
+	// (identified in game by keeping each one alone).
+	struct flare_element
+	{
+		uint32_t vs, ps;
+		camfx::flare_part part;
+	};
+	const flare_element flare_elements[] = {
+		{ 0xaafcc02e, 0x7b83c99b, camfx::flare_part::glow },
+		{ 0xaafcc02e, 0x7f937554, camfx::flare_part::star },
+		{ 0x9bee5ecc, 0x2e20deea, camfx::flare_part::ghosts },
+		{ 0x9bee5ecc, 0x85a3db94, camfx::flare_part::ghosts },
+		{ 0xaafcc02e, 0x10d0a87f, camfx::flare_part::ghosts },
+	};
+	std::map<uint32_t, std::vector<const uint8_t *>> flare_shaders;
+	for (const flare_element &e : flare_elements)
+	{
+		flare_shaders.try_emplace(e.vs);
+		flare_shaders.try_emplace(e.ps);
+	}
+
+	size_t tonemap = 0;
 	std::vector<container> bloom_tonemaps;
 	for (const container &c : containers)
 	{
 		const uint8_t *code = pak.data() + c.offset;
-		const std::string_view entry = camfx::entry_point(code, c.size);
-		billboard += entry == "vh_billboard_lights";
-		tonemap += entry == "ph_tonemapping";
-
-		const camfx::pso_kind vs = camfx::classify_vertex_shader(code, c.size);
-		const camfx::pso_kind ps = camfx::classify_pixel_shader(code, c.size);
-		counts[size_t(vs)]++;
-		counts[size_t(ps)]++;
-		if (vs == camfx::pso_kind::light_glow)
-			glow_digests.insert(camfx::to_hex(digest_of(code, c.size)));
-		if (ps == camfx::pso_kind::tonemap_bloom)
+		tonemap += camfx::entry_point(code, c.size) == "ph_tonemapping";
+		if (camfx::classify_pixel_shader(code, c.size) == camfx::pso_kind::tonemap_bloom)
 			bloom_tonemaps.push_back(c);
+		const auto it = flare_shaders.find(camfx::digest_prefix(code, c.size));
+		if (it != flare_shaders.end())
+			it->second.push_back(code);
 	}
-	const size_t glow = counts[size_t(camfx::pso_kind::light_glow)], point = counts[size_t(camfx::pso_kind::light_point)], bloom = counts[size_t(camfx::pso_kind::tonemap_bloom)];
-	printf("vh_billboard_lights %zu, ph_tonemapping %zu, light_glow %zu, light_point %zu, tonemap_bloom %zu\n", billboard, tonemap, glow, point, bloom);
-
-	check(glow >= 1 && point >= 1, "billboard light shaders split into glow and point variants");
-	check(glow + point == billboard, "every vh_billboard_lights is classified");
+	const size_t bloom = bloom_tonemaps.size();
+	printf("ph_tonemapping %zu, tonemap_bloom %zu\n", tonemap, bloom);
 	check(bloom >= 1 && bloom < tonemap, "some, not all, tonemapping permutations have bloom");
 
 	// Numbers from the analysis of this exact package (sim version of October 2026).
 	if (pak_path.find(L"SHADERSPAK.d5d2118d.SM6.PC.PAK") != std::wstring::npos)
 	{
 		check(containers.size() == 8350, "8350 containers");
-		check(glow == 4 && point == 2, "4 light glow and 2 light point vertex shaders");
 		check(tonemap == 770 && bloom == 384, "770 tonemapping permutations, 384 with bloom");
-		check(glow_digests == std::set<std::string> {
-			"dfdd7d87da240aa9bffcbc1760c20c2b", "51760125040cb4c13216d1654508ff66", "6c1e08b0f01d87e2d0b5f6269b312754", "4f0dd64fa43a92d53a366e73e006ccac" },
-			"light glow vertex shaders are the 4 that output FlareUV");
+
+		size_t found = 0;
+		for (const flare_element &e : flare_elements)
+		{
+			const std::vector<const uint8_t *> &vs = flare_shaders[e.vs], &ps = flare_shaders[e.ps];
+			if (vs.size() != 1 || ps.size() != 1)
+				continue;
+			const size_t vs_size = container_size_of(vs[0]), ps_size = container_size_of(ps[0]);
+			camfx::flare_part part;
+			if (camfx::classify_pipeline(vs[0], vs_size, ps[0], ps_size) == camfx::pso_kind::material &&
+				camfx::known_flare_part(camfx::flare_tag(camfx::digest_prefix(vs[0], vs_size), camfx::digest_prefix(ps[0], ps_size)), part) && part == e.part)
+				++found;
+		}
+		printf("known lens flare elements found: %zu of %zu\n", found, std::size(flare_elements));
+		check(found == std::size(flare_elements), "each known lens flare element is a vh_base/ph_base pipeline of this package, with its part");
 	}
 
 	if (argc >= 3)

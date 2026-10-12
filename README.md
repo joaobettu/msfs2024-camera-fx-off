@@ -2,12 +2,29 @@
 
 By **PdPanoo**
 
+> [!NOTE]
+> **This add-on is in beta.** Please report any problem, and send any feedback, through the [GitHub issues](https://github.com/joaobettu/msfs2024-camera-fx-off/issues). Attaching `msfs2024-camera-fx-off.log` from the game folder helps a lot.
+
 A ReShade add-on that removes the "filmed with a camera" look from Microsoft Flight Simulator 2024:
 
-- **Lens flare:** the ghosts and lens glare the game draws when the sun is on screen go away. Each element of the flare can be kept from the overlay, for example the glow around the sun.
+- **Lens flare:** the star rays and lens ghosts the game draws when the sun is on screen go away. The glow around the sun stays by default, and each of the three parts can be kept or removed from the overlay.
 - **Bloom and lens dirt:** tonemapping uses the game's own permutation **without bloom**, the same one the engine would use with bloom turned off. Lens dirt only exists together with bloom, so it goes away too.
 
 City, airport and aircraft lights are left alone.
+
+## Before and after
+
+Each GIF alternates between the sim's own look ("On") and the look with the add-on and its default settings ("Off").
+
+**Lens flare.** The star rays and the ghosts are gone, and the glow around the sun stays.
+
+![Lens flare on and off](docs/images/lens_flare.gif)
+
+**Bloom.** The halos around the lights are gone, and so is the lens dirt that comes with bloom.
+
+![Bloom on and off](docs/images/bloom.gif)
+
+Still images: lens flare [on](docs/images/lens_flare_on.jpg) and [off](docs/images/lens_flare_off.jpg); bloom [on](docs/images/bloom_on.jpg) and [off](docs/images/bloom_off.jpg).
 
 ## Requirements
 
@@ -36,14 +53,17 @@ The same options are in the ReShade overlay, **Add-ons** tab, along with counter
 
 ### Keeping part of the lens flare
 
-The lens flare is made of several elements. Under the lens flare option, the overlay lists every element the game has drawn so far. Look at the sun with the overlay open and they show up, each one with a **Keep** checkbox and the number of quads it draws per second.
+The sim's lens flare has three parts. Under the lens flare option, the overlay has a checkbox to keep each one:
 
-A kept element is still drawn while the rest of the lens flare is removed. Check them one at a time to find the one you want, such as the glow around the sun. Your choice is saved and applies to later flights too.
+| Part | Kept by default | What it is |
+|---|---|---|
+| Glow around the sun | yes | the soft halo around the sun, without which the sun at noon is just a white dot |
+| Star rays | no | the star-shaped rays on the sun |
+| Lens ghosts | no | the reflections of the lens along the line from the sun through the center of the screen |
 
-- Elements are named after their shaders (`VS xxxxxxxx, PS yyyyyyyy`). A kept element stays kept as long as a sim update does not change those shaders.
-- Each element is one pair of shaders. Some elements draw several quads per frame, and those quads are kept or removed together.
+A kept part is still drawn while the rest of the lens flare is removed. Turning the lens flare removal off brings all three back.
 
-Bloom also draws a glow around the sun. If that glow is all you miss, turning the bloom removal off brings it back, along with the lens dirt.
+Bloom also draws some glow around the sun. Turning the bloom removal off brings it back, along with the lens dirt.
 
 ### Settings file
 
@@ -52,23 +72,34 @@ Your choices are saved in `msfs2024-camera-fx-off.ini`, next to the add-on, in t
 | Key | Default | Meaning |
 |---|---|---|
 | `sun_flare_off` | `1` | remove the lens flare |
-| `flare_keep` | (empty) | lens flare elements to keep, as `vvvvvvvv:pppppppp` (vertex and pixel shader), separated by commas |
+| `keep_glow`, `keep_star`, `keep_ghosts` | `1`, `0`, `0` | parts of the lens flare to keep while it is removed |
 | `bloom_off` | `1` | remove bloom and lens dirt |
 | `key_flare`, `key_bloom`, `key_trace` | `116`, `117`, `118` (F5, F6, F7) | shortcut keys, pressed with Ctrl+Shift, as Windows virtual-key codes |
-| `light_glow_off`, `light_point_off` | `0` | diagnostics, see below |
 | `pak_path` | (empty) | full path of the game's `SHADERSPAK.*.SM6.PC.PAK`, if it is not in the `Shaders` folder next to the game executable |
+
+Keys from earlier versions (`flare_keep`, `light_glow_off`, `light_point_off`) are ignored, and removed from the file the next time you change an option.
 
 The log, `msfs2024-camera-fx-off.log`, is rewritten every time the sim starts. It shows:
 
 - the tonemaps that got their no-bloom twin;
-- the lens flare elements seen;
-- the pipelines whose quads were removed as lens flare.
+- the shaders of each lens flare element, and which part of the lens flare it draws.
 
-The diagnostic options ("Hide the light glow", "Hide the light points") only show in game what each class of light shader draws. They **hide lights** and are off by default.
+## Performance
+
+The add-on's own work per frame is small: a few lookups per pipeline bind and draw (see "Cost per frame" below).
+
+Removing the effects saves the GPU some work instead:
+
+- it no longer blends the lens flare quads over the full-resolution image;
+- the tonemap pass no longer reads the bloom and lens dirt textures.
+
+In testing at 3840x2160 on an RTX 4070, turning the removals on gained about 1 FPS. The gain depends on resolution and GPU, and is small: the passes that build the bloom still run, because only the final tonemap is swapped.
 
 ## After a sim update
 
-The lens flare is recognized from the context of each draw, not by shader hash, so its removal should keep working. Kept elements, though, are named after their shaders. If an update changes those shaders, pick the elements to keep again.
+The lens flare is recognized from the context of each draw, not by shader hash, so its removal should keep working.
+
+Its three parts, though, are told apart by their shaders. If an update changes those shaders, the add-on falls back to the order the engine draws them in: the glow first, then the star rays, then the ghosts. The log says when that happens ("has shaders this version does not know"). If the parts come out wrong after an update, please open an issue.
 
 The bloom removal depends on a table of pairs made for the current shader package. If the sim updates, the log and the overlay say so, and bloom simply stays on. To regenerate the table, run this from the source folder (pass `-GamePath` if the game is not in `D:\SteamLibrary\steamapps\common\Limitless`):
 
@@ -85,8 +116,9 @@ Everything is done through ReShade events, with no hooks of its own.
 - **Lens flare:** after upscaling (DLSS/FSR/TAA) and before post-processing, the engine has a `do_flare` pass.
   - Each element of the flare is drawn there as a quad (a 4-vertex `draw`) with the generic material shaders (`vh_base`/`ph_base`).
   - The target is the HDR image (R11G11B10), with no depth bound.
-  - The add-on skips exactly those draws, except for the elements set to keep.
+  - The add-on skips exactly those draws, except for the parts set to keep.
   - The same shaders draw transparent geometry in the main pass, but always with depth bound, so those draws are left alone.
+  - The 24 quads come from 5 pairs of shaders: one for the glow, one for the star rays and three for the ghosts. The add-on knows them by digest, with the draw order as a fallback.
 - **Bloom:**
   - Of the 770 `ph_tonemapping` permutations in the `SHADERSPAK`, 384 have bloom. All of them, and only them, bind the lens dirt texture at `t8`.
   - Each one has a no-bloom twin: the same resources minus `t8`/`s8`, and the same code minus the bloom block.
@@ -122,16 +154,16 @@ The scripts default to the game in `D:\SteamLibrary\steamapps\common\Limitless`.
 What the tests cover:
 
 - `classify_test` runs against the real `SHADERSPAK`, read-only.
-  - It checks the counts: 4 light glow shaders, 2 light point shaders and 384 tonemaps with bloom. These are the counts for the shader package the add-on was tested with (`SHADERSPAK.d5d2118d.SM6.PC.PAK`); a sim update may change them.
+  - It checks the counts: 770 tonemaps, 384 of them with bloom. These are the counts for the shader package the add-on was tested with (`SHADERSPAK.d5d2118d.SM6.PC.PAK`); a sim update may change them.
+  - It checks that the 5 lens flare elements the add-on knows are in that package, as `vh_base`/`ph_base` pipelines, each with its part.
   - It validates every pair in the table.
   - It fuzzes the parsers with the end of the buffer right against an inaccessible page, so any out-of-bounds read breaks the test.
 - `fixture` loads a copy of ReShade's `dxgi.dll` with the add-on, on a D3D12 device on WARP (CPU only). It draws stand-ins for the MSFS shaders, with the same names and signatures, and checks the pixels:
-  - the lens flare quad on an HDR target without depth is skipped;
-  - the quad of a lens flare element set to keep is drawn;
+  - a lens flare of 4 quads on an HDR target without depth: unknown shaders, so the add-on goes by draw order, and each part is kept or removed as set;
   - the same quad with depth bound, and a 3-vertex draw, are kept;
-  - the lights are kept;
+  - the lights are kept, even with the old diagnostic keys in the settings;
   - the tonemap is swapped for its twin.
-- An extra `fixture` run builds pipelines from the game's own light shaders and bloom tonemap shader, taken from its package. It checks that the add-on recognizes them and creates the real no-bloom twin. These pipelines are only compiled, never drawn.
+- An extra `fixture` run builds a pipeline from the game's own bloom tonemap shader, taken from its package. It checks that the add-on creates the real no-bloom twin. That pipeline is only compiled, never drawn.
 - `scripts\test.ps1 -Gpu` runs the `fixture` on the graphics card. While the sim is running, it only does so with `-Force`.
 
 ## Credits and license

@@ -1,7 +1,7 @@
 // MSFS 2024 Camera FX Off, by PdPanoo
 // ReShade add-on that removes the "filmed with a camera" look from Microsoft Flight Simulator 2024:
-// - the lens flare (sun ghosts and glare), by skipping the quads the game draws for it right after upscaling; each element
-//   of the flare can be kept from the overlay;
+// - the lens flare, by skipping the quads the game draws for it right after upscaling; its glow, star rays and ghosts can
+//   each be kept from the overlay (by default the glow around the sun is);
 // - bloom and its lens dirt, by binding the game's own tonemapping permutation without bloom in place of the one with it.
 // It only uses ReShade events: no hooks of its own, and little per-call work (a lock-free table lookup on pipeline binds,
 // a view format lookup on render target binds without depth).
@@ -22,10 +22,10 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 using namespace reshade::api;
+using camfx::flare_part;
 using camfx::pso_kind;
 
 extern "C" __declspec(dllexport) const char *NAME = "MSFS 2024 Camera FX Off";
@@ -40,10 +40,10 @@ namespace
 	// Settings, stored in msfs2024-camera-fx-off.ini next to the add-on
 
 	std::atomic<bool> g_sun_flare_off { true };
+	// Parts of the lens flare still drawn with its removal on, by camfx::flare_part: only the glow by default.
+	std::atomic<bool> g_keep[camfx::flare_part_count] = { true, false, false };
+	const wchar_t *const g_keep_keys[camfx::flare_part_count] = { L"keep_glow", L"keep_star", L"keep_ghosts" };
 	std::atomic<bool> g_bloom_off { true };
-	// Diagnostics: hide the billboard lights, to see in game what each class of light shader draws.
-	std::atomic<bool> g_glow_off { false };
-	std::atomic<bool> g_point_off { false };
 	// Pressed together with Ctrl+Shift
 	UINT g_key_flare = VK_F5, g_key_bloom = VK_F6, g_key_trace = VK_F7;
 
@@ -65,94 +65,13 @@ namespace
 		return w;
 	}
 
-	// Lens flare elements: the material pipelines whose quads make up the lens flare, named by the first 4 bytes of their
-	// vertex and pixel shader digests (tag = vs << 32 | ps) and listed in the order first drawn. Each one can be kept, that
-	// is still drawn with the lens flare removal on (e.g. the glow around the sun). Looked up on draws without a lock.
-	struct flare_element
-	{
-		// Written once, before g_element_count publishes the element.
-		uint64_t tag = 0;
-		std::atomic<bool> keep { false };
-		std::atomic<uint64_t> quads { 0 };
-		// Present thread only: quads per second.
-		uint64_t counted = 0, rate = 0;
-	};
-
-	constexpr size_t max_flare_elements = 32;
-	flare_element g_elements[max_flare_elements];
-	std::atomic<size_t> g_element_count { 0 };
-	std::mutex g_element_mutex;
-
-	std::string tag_text(uint64_t tag)
-	{
-		char text[24];
-		snprintf(text, sizeof(text), "%08x:%08x", uint32_t(tag >> 32), uint32_t(tag));
-		return text;
-	}
-
-	// The reverse of tag_text, spaces around it allowed. Zero if malformed.
-	// (Parsed by hand: swscanf would link the CRT's whole scanf implementation into the add-on.)
-	uint64_t parse_tag(std::wstring_view text)
-	{
-		while (!text.empty() && (text.front() == L' ' || text.front() == L'\t'))
-			text.remove_prefix(1);
-		while (!text.empty() && (text.back() == L' ' || text.back() == L'\t'))
-			text.remove_suffix(1);
-		if (text.size() != 17 || text[8] != L':')
-			return 0;
-		uint64_t tag = 0;
-		for (size_t i = 0; i < text.size(); ++i)
-		{
-			if (i == 8)
-				continue;
-			const wchar_t c = text[i];
-			const int digit = (c >= L'0' && c <= L'9') ? c - L'0' : (c >= L'a' && c <= L'f') ? c - L'a' + 10 : (c >= L'A' && c <= L'F') ? c - L'A' + 10 : -1;
-			if (digit < 0)
-				return 0;
-			tag = (tag << 4) | uint64_t(digit);
-		}
-		return tag;
-	}
-
-	flare_element *find_element(uint64_t tag)
-	{
-		const size_t count = g_element_count.load(std::memory_order_acquire);
-		for (size_t i = 0; i < count; ++i)
-			if (g_elements[i].tag == tag)
-				return &g_elements[i];
-		return nullptr;
-	}
-
-	// Null for a pipeline without a name (unsigned shaders, which the game does not ship) or once the list is full.
-	flare_element *add_element(uint64_t tag, bool *added = nullptr)
-	{
-		if (tag == 0)
-			return nullptr;
-		if (flare_element *const element = find_element(tag))
-			return element;
-		if (g_element_count.load(std::memory_order_relaxed) == max_flare_elements)
-			return nullptr;
-
-		const std::lock_guard<std::mutex> lock(g_element_mutex);
-		if (flare_element *const element = find_element(tag))
-			return element;
-		const size_t count = g_element_count.load(std::memory_order_relaxed);
-		if (count == max_flare_elements)
-			return nullptr;
-		g_elements[count].tag = tag;
-		g_element_count.store(count + 1, std::memory_order_release);
-		if (added != nullptr)
-			*added = true;
-		return &g_elements[count];
-	}
-
 	void load_settings()
 	{
 		const auto get = [](const wchar_t *key, int def) { return int(GetPrivateProfileIntW(L"settings", key, def, g_ini_path.c_str())); };
 		g_sun_flare_off = get(L"sun_flare_off", 1) != 0;
+		for (size_t i = 0; i < camfx::flare_part_count; ++i)
+			g_keep[i] = get(g_keep_keys[i], i == size_t(flare_part::glow)) != 0;
 		g_bloom_off = get(L"bloom_off", 1) != 0;
-		g_glow_off = get(L"light_glow_off", 0) != 0;
-		g_point_off = get(L"light_point_off", 0) != 0;
 		g_key_flare = UINT(get(L"key_flare", VK_F5));
 		g_key_bloom = UINT(get(L"key_bloom", VK_F6));
 		g_key_trace = UINT(get(L"key_trace", VK_F7));
@@ -160,38 +79,26 @@ namespace
 		wchar_t pak[MAX_PATH] = L"";
 		GetPrivateProfileStringW(L"settings", L"pak_path", L"", pak, MAX_PATH, g_ini_path.c_str());
 		g_pak_override = pak;
-
-		// Lens flare elements to keep, "vvvvvvvv:pppppppp,vvvvvvvv:pppppppp". They are listed right away, so they can be
-		// unchecked before the sun is in view.
-		wchar_t keep[1024] = L"";
-		GetPrivateProfileStringW(L"settings", L"flare_keep", L"", keep, 1024, g_ini_path.c_str());
-		for (std::wstring_view list = keep; !list.empty();)
-		{
-			const size_t comma = list.find(L',');
-			if (flare_element *const element = add_element(parse_tag(list.substr(0, comma))))
-				element->keep = true;
-			list = comma != std::wstring_view::npos ? list.substr(comma + 1) : std::wstring_view();
-		}
-	}
-
-	std::string kept_elements()
-	{
-		std::string list;
-		const size_t count = g_element_count.load(std::memory_order_acquire);
-		for (size_t i = 0; i < count; ++i)
-			if (g_elements[i].keep.load(std::memory_order_relaxed))
-				list += (list.empty() ? "" : ",") + tag_text(g_elements[i].tag);
-		return list;
 	}
 
 	void save_settings()
 	{
 		const auto put = [](const wchar_t *key, bool value) { WritePrivateProfileStringW(L"settings", key, value ? L"1" : L"0", g_ini_path.c_str()); };
 		put(L"sun_flare_off", g_sun_flare_off);
+		for (size_t i = 0; i < camfx::flare_part_count; ++i)
+			put(g_keep_keys[i], g_keep[i]);
 		put(L"bloom_off", g_bloom_off);
-		put(L"light_glow_off", g_glow_off);
-		put(L"light_point_off", g_point_off);
-		WritePrivateProfileStringW(L"settings", L"flare_keep", widen(kept_elements()).c_str(), g_ini_path.c_str());
+		// Keys of earlier versions
+		for (const wchar_t *const key : { L"flare_keep", L"light_glow_off", L"light_point_off" })
+			WritePrivateProfileStringW(L"settings", key, nullptr, g_ini_path.c_str());
+	}
+
+	std::string keep_text()
+	{
+		char text[64];
+		snprintf(text, sizeof(text), "keep_glow=%d keep_star=%d keep_ghosts=%d",
+			int(g_keep[size_t(flare_part::glow)].load()), int(g_keep[size_t(flare_part::star)].load()), int(g_keep[size_t(flare_part::ghosts)].load()));
+		return text;
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -450,6 +357,8 @@ namespace
 		uint64_t tag = 0;
 		// Render target 0 is an R11G11B10 HDR target with no depth bound: where the game draws its lens flare after upscaling.
 		bool flare_target = false;
+		// Lens flare quads drawn since that target was bound
+		uint32_t flare_quads = 0;
 		uint32_t id = 0;
 	};
 
@@ -524,8 +433,8 @@ namespace
 			log("trace: cannot write %S", g_trace_path.c_str());
 			return;
 		}
-		fprintf(file, "# MSFS 2024 Camera FX Off %s frame trace: sun_flare_off=%d bloom_off=%d light_glow_off=%d light_point_off=%d flare_keep=%s, %zu lines%s\n",
-			CAMFX_VERSION_STRING, int(g_sun_flare_off.load()), int(g_bloom_off.load()), int(g_glow_off.load()), int(g_point_off.load()), kept_elements().c_str(),
+		fprintf(file, "# MSFS 2024 Camera FX Off %s frame trace: sun_flare_off=%d %s bloom_off=%d, %zu lines%s\n",
+			CAMFX_VERSION_STRING, int(g_sun_flare_off.load()), keep_text().c_str(), int(g_bloom_off.load()),
 			lines.size(), lines.size() >= max_trace_lines ? " (truncated)" : "");
 		for (const std::string &line : lines)
 			fprintf(file, "%s\n", line.c_str());
@@ -536,11 +445,11 @@ namespace
 	// ---------------------------------------------------------------------------------------------
 	// Statistics
 
-	std::atomic<uint64_t> g_flare_skipped { 0 }, g_flare_kept { 0 }, g_glow_skipped { 0 }, g_point_skipped { 0 }, g_bloom_swapped { 0 }, g_bloom_kept { 0 };
+	std::atomic<uint64_t> g_flare_skipped { 0 }, g_flare_kept { 0 }, g_bloom_swapped { 0 }, g_bloom_kept { 0 };
 
 	struct rates
 	{
-		uint64_t flare_skipped, flare_kept, glow_skipped, point_skipped, bloom_swapped, bloom_kept;
+		uint64_t flare_skipped, flare_kept, bloom_swapped, bloom_kept;
 
 		bool operator==(const rates &) const = default;
 	};
@@ -554,53 +463,79 @@ namespace
 		if (now - g_rate_tick < 1000)
 			return;
 		const double seconds = g_rate_tick != 0 ? double(now - g_rate_tick) / 1000.0 : 1.0;
-		const rates totals = { g_flare_skipped.load(), g_flare_kept.load(), g_glow_skipped.load(), g_point_skipped.load(), g_bloom_swapped.load(), g_bloom_kept.load() };
+		const rates totals = { g_flare_skipped.load(), g_flare_kept.load(), g_bloom_swapped.load(), g_bloom_kept.load() };
 		const auto per_second = [seconds](uint64_t a, uint64_t b) { return uint64_t(double(a - b) / seconds + 0.5); };
 		g_rates = {
 			per_second(totals.flare_skipped, g_totals.flare_skipped),
 			per_second(totals.flare_kept, g_totals.flare_kept),
-			per_second(totals.glow_skipped, g_totals.glow_skipped),
-			per_second(totals.point_skipped, g_totals.point_skipped),
 			per_second(totals.bloom_swapped, g_totals.bloom_swapped),
 			per_second(totals.bloom_kept, g_totals.bloom_kept) };
 		g_totals = totals;
-
-		const size_t elements = g_element_count.load(std::memory_order_acquire);
-		for (size_t i = 0; i < elements; ++i)
-		{
-			flare_element &element = g_elements[i];
-			const uint64_t quads = element.quads.load(std::memory_order_relaxed);
-			element.rate = per_second(quads, element.counted);
-			element.counted = quads;
-		}
 		g_rate_tick = now;
 
 		// Log only when something changed, to keep the log small.
 		if (now - g_log_tick >= 10000 && !(g_rates == g_logged))
 		{
-			log("stats/s: flare quads skipped %llu, flare quads kept %llu, tonemap binds swapped %llu, tonemap with bloom drawn %llu, light glow skipped %llu, light points skipped %llu",
-				g_rates.flare_skipped, g_rates.flare_kept, g_rates.bloom_swapped, g_rates.bloom_kept, g_rates.glow_skipped, g_rates.point_skipped);
+			log("stats/s: flare quads skipped %llu, flare quads kept %llu, tonemap binds swapped %llu, tonemap with bloom drawn %llu",
+				g_rates.flare_skipped, g_rates.flare_kept, g_rates.bloom_swapped, g_rates.bloom_kept);
 			g_logged = g_rates;
 			g_log_tick = now;
 		}
 	}
 
-	// The first distinct pipelines whose draws were skipped as lens flare, logged once each.
-	std::mutex g_flare_log_mutex;
-	std::unordered_set<uint64_t> g_flare_logged;
-	std::atomic<size_t> g_flare_logged_count { 0 };
+	// ---------------------------------------------------------------------------------------------
+	// Lens flare elements seen so far: one per pair of shaders (camfx::flare_tag), with the part of the lens flare it draws.
+	// Looked up on draws without a lock.
 
-	void log_flare_pipeline(uint64_t pipeline)
+	struct flare_element
 	{
-		if (g_flare_logged_count.load(std::memory_order_relaxed) >= 32)
-			return;
-		{
-			const std::lock_guard<std::mutex> lock(g_flare_log_mutex);
-			if (g_flare_logged.size() >= 32 || !g_flare_logged.insert(pipeline).second)
-				return;
-			g_flare_logged_count = g_flare_logged.size();
-		}
-		log("lens flare: skipping quads of %s", pipeline_label(pipeline).c_str());
+		// Written once, before g_element_count publishes the element.
+		uint64_t tag = 0;
+		flare_part part = flare_part::ghosts;
+		// In the table of known shaders, rather than told by its draw order
+		bool known = false;
+	};
+
+	constexpr size_t max_flare_elements = 32;
+	flare_element g_elements[max_flare_elements];
+	std::atomic<size_t> g_element_count { 0 };
+	std::mutex g_element_mutex;
+
+	const flare_element *find_element(uint64_t tag)
+	{
+		const size_t count = g_element_count.load(std::memory_order_acquire);
+		for (size_t i = 0; i < count; ++i)
+			if (g_elements[i].tag == tag)
+				return &g_elements[i];
+		return nullptr;
+	}
+
+	// The element of a lens flare quad, added the first time it is drawn. Its part comes from the table of known shaders or,
+	// for other shaders (after a sim update), from the position of its first quad in the lens flare ('index').
+	// Null for a pipeline without a name (unsigned shaders, which the game does not ship) or once the list is full.
+	const flare_element *flare_element_of(uint64_t tag, uint32_t index, bool &added)
+	{
+		if (tag == 0)
+			return nullptr;
+		if (const flare_element *const element = find_element(tag))
+			return element;
+		if (g_element_count.load(std::memory_order_relaxed) == max_flare_elements)
+			return nullptr;
+
+		const std::lock_guard<std::mutex> lock(g_element_mutex);
+		if (const flare_element *const element = find_element(tag))
+			return element;
+		const size_t count = g_element_count.load(std::memory_order_relaxed);
+		if (count == max_flare_elements)
+			return nullptr;
+		flare_element &element = g_elements[count];
+		element.tag = tag;
+		element.known = camfx::known_flare_part(tag, element.part);
+		if (!element.known)
+			element.part = camfx::flare_part_by_order(index);
+		g_element_count.store(count + 1, std::memory_order_release);
+		added = true;
+		return &element;
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -654,15 +589,11 @@ namespace
 		}
 	}
 
-	// The first 4 bytes of the container digest as in the labels ("#1a2b3c4d" is 0x1a2b3c4d), zero if there is none.
 	uint32_t digest_prefix_guarded(const shader_desc *desc)
 	{
 		__try
 		{
-			uint8_t digest[16];
-			if (desc == nullptr || !dxbc::digest(desc->code, desc->code_size, digest))
-				return 0;
-			return (uint32_t(digest[0]) << 24) | (uint32_t(digest[1]) << 16) | (uint32_t(digest[2]) << 8) | uint32_t(digest[3]);
+			return desc != nullptr ? camfx::digest_prefix(desc->code, desc->code_size) : 0;
 		}
 		__except (EXCEPTION_EXECUTE_HANDLER)
 		{
@@ -732,7 +663,7 @@ namespace
 		if (kind == pso_kind::tonemap_bloom)
 			info.twin = create_twin(dev, layout, count, subobjects, *ps);
 		if (kind == pso_kind::material)
-			info.tag = (uint64_t(digest_prefix_guarded(vs)) << 32) | digest_prefix_guarded(ps);
+			info.tag = camfx::flare_tag(digest_prefix_guarded(vs), digest_prefix_guarded(ps));
 
 		bool inserted;
 		{
@@ -793,6 +724,7 @@ namespace
 			state->pipeline = 0;
 			state->tag = 0;
 			state->flare_target = false;
+			state->flare_quads = 0;
 		}
 	}
 
@@ -832,29 +764,32 @@ namespace
 
 	bool filter_draw(command_list *cmd, draw_type type, uint32_t count, uint32_t instances)
 	{
-		const cmd_state *const state = cmd->get_private_data<cmd_state>();
+		cmd_state *const state = cmd->get_private_data<cmd_state>();
 		// What the draw was recognized as, for the trace
 		const char *what = nullptr;
-		flare_element *element = nullptr;
 		bool skip = false, kept = false;
 		switch (state != nullptr ? state->kind : pso_kind::none)
 		{
 		case pso_kind::material:
-			// The lens flare elements: single quads drawn with material shaders into the HDR target right after upscaling,
-			// with no depth bound. The same shaders draw transparent geometry in the main pass, always with depth.
+			// The lens flare: single quads drawn with material shaders into the HDR target right after upscaling, with no
+			// depth bound. The same shaders draw transparent geometry in the main pass, always with depth.
 			if (type == draw_type::draw && count == 4 && instances == 1 && state->flare_target)
 			{
-				what = "lens flare";
+				const uint32_t index = state->flare_quads++;
 				bool added = false;
-				element = add_element(state->tag, &added);
-				if (added)
-					log("lens flare: element #%zu is %s", size_t(element - g_elements) + 1, pipeline_label(state->pipeline).c_str());
-				if (element != nullptr)
-					element->quads.fetch_add(1, std::memory_order_relaxed);
+				const flare_element *const element = flare_element_of(state->tag, index, added);
+				if (added && element->known)
+					log("lens flare: %s draws the %s", pipeline_label(state->pipeline).c_str(), camfx::part_name(element->part));
+				else if (added)
+					log("lens flare: %s has shaders this version does not know (sim updated?); its first quad is #%u of the lens flare, so it is taken as the %s",
+						pipeline_label(state->pipeline).c_str(), index + 1, camfx::part_name(element->part));
+				const flare_part part = element != nullptr ? element->part : camfx::flare_part_by_order(index);
 
+				static const char *const names[camfx::flare_part_count] = { "lens flare glow", "lens flare star rays", "lens flare ghosts" };
+				what = names[size_t(part)];
 				if (!g_sun_flare_off.load(std::memory_order_relaxed))
 					break;
-				if (element != nullptr && element->keep.load(std::memory_order_relaxed))
+				if (g_keep[size_t(part)].load(std::memory_order_relaxed))
 				{
 					g_flare_kept.fetch_add(1, std::memory_order_relaxed);
 					kept = true;
@@ -862,25 +797,8 @@ namespace
 				else
 				{
 					g_flare_skipped.fetch_add(1, std::memory_order_relaxed);
-					log_flare_pipeline(state->pipeline);
 					skip = true;
 				}
-			}
-			break;
-		case pso_kind::light_glow:
-			what = "light glow";
-			if (g_glow_off.load(std::memory_order_relaxed))
-			{
-				g_glow_skipped.fetch_add(1, std::memory_order_relaxed);
-				skip = true;
-			}
-			break;
-		case pso_kind::light_point:
-			what = "light point";
-			if (g_point_off.load(std::memory_order_relaxed))
-			{
-				g_point_skipped.fetch_add(1, std::memory_order_relaxed);
-				skip = true;
 			}
 			break;
 		case pso_kind::tonemap_bloom:
@@ -894,12 +812,9 @@ namespace
 		if (g_tracing.load(std::memory_order_relaxed))
 		{
 			static const char *const names[] = { "draw", "draw_indexed", "indirect" };
-			const char *const verdict = skip ? "skipped: " : kept ? "kept: " : "";
 			char note[64] = "";
-			if (element != nullptr)
-				snprintf(note, sizeof(note), " [%s%s #%zu]", verdict, what, size_t(element - g_elements) + 1);
-			else if (what != nullptr)
-				snprintf(note, sizeof(note), " [%s%s]", verdict, what);
+			if (what != nullptr)
+				snprintf(note, sizeof(note), " [%s%s]", skip ? "skipped: " : kept ? "kept: " : "", what);
 			trace(cmd, "%s %u %u%s", names[int(type)], count, instances, note);
 		}
 		return skip;
@@ -941,6 +856,7 @@ namespace
 			return;
 		// Only render target binds without depth need the format lookup, which keeps it off the main passes.
 		state->flare_target = !has_depth && rtv.handle != 0 && view_format(cmd->get_device(), rtv) == format::r11g11b10_float;
+		state->flare_quads = 0;
 	}
 
 	void on_bind_render_targets(command_list *cmd, uint32_t count, const resource_view *rtvs, resource_view dsv)
@@ -995,36 +911,22 @@ namespace
 	// ---------------------------------------------------------------------------------------------
 	// Settings panel in the ReShade overlay (Add-ons tab)
 
-	void set_keep(size_t i, bool keep)
-	{
-		g_elements[i].keep = keep;
-		save_settings();
-		log("lens flare: element #%zu (%s) %s", i + 1, tag_text(g_elements[i].tag).c_str(), keep ? "kept" : "removed");
-	}
-
 	void draw_overlay(effect_runtime *)
 	{
 		bool value = g_sun_flare_off;
 		if (ImGui::Checkbox(("Remove the sun lens flare (Ctrl+Shift+" + key_name(g_key_flare) + ")").c_str(), &value))
 			toggle(g_sun_flare_off, "lens flare removal");
 
-		// The lens flare elements seen so far, to keep some of them (e.g. the glow around the sun).
+		// Parts of the lens flare to keep
+		static const char *const labels[camfx::flare_part_count] = { "Keep the glow around the sun", "Keep the star rays", "Keep the lens ghosts" };
+		static const char *const log_names[camfx::flare_part_count] = { "keep glow", "keep star rays", "keep ghosts" };
 		ImGui::Indent();
 		ImGui::BeginDisabled(!g_sun_flare_off);
-		const size_t elements = g_element_count.load(std::memory_order_acquire);
-		if (elements == 0)
-			ImGui::TextDisabled("Look at the sun to list the lens flare elements here.");
-		else
-			ImGui::TextDisabled("Lens flare elements: the checked ones are kept.");
-		for (size_t i = 0; i < elements; ++i)
+		for (size_t i = 0; i < camfx::flare_part_count; ++i)
 		{
-			const flare_element &element = g_elements[i];
-			char label[96];
-			snprintf(label, sizeof(label), "Keep #%zu: VS %08x, PS %08x (%llu quads/s)###flare_element_%zu",
-				i + 1, uint32_t(element.tag >> 32), uint32_t(element.tag), element.rate, i);
-			value = element.keep.load(std::memory_order_relaxed);
-			if (ImGui::Checkbox(label, &value))
-				set_keep(i, value);
+			value = g_keep[i];
+			if (ImGui::Checkbox(labels[i], &value))
+				toggle(g_keep[i], log_names[i]);
 		}
 		ImGui::EndDisabled();
 		ImGui::Unindent();
@@ -1037,8 +939,7 @@ namespace
 		ImGui::Text("Per second: %llu lens flare quads removed, %llu kept, %llu tonemap binds swapped", g_rates.flare_skipped, g_rates.flare_kept, g_rates.bloom_swapped);
 		if (g_rates.bloom_kept != 0)
 			ImGui::Text("Per second: %llu tonemap draws still with bloom", g_rates.bloom_kept);
-		ImGui::Text("Pipelines: %u tonemap with bloom (%u with a no-bloom twin), %u light glow, %u light point",
-			g_pso_count[size_t(pso_kind::tonemap_bloom)].load(), g_twin_count.load(), g_pso_count[size_t(pso_kind::light_glow)].load(), g_pso_count[size_t(pso_kind::light_point)].load());
+		ImGui::Text("Tonemap pipelines with bloom: %u, %u with a no-bloom twin", g_pso_count[size_t(pso_kind::tonemap_bloom)].load(), g_twin_count.load());
 
 		if (g_twins_tried && !g_twins_ok)
 			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Bloom: the .twins file is missing or made for another sim version (see the log)");
@@ -1048,15 +949,6 @@ namespace
 		ImGui::Spacing();
 		if (ImGui::Button(("Record a one-frame trace (Ctrl+Shift+" + key_name(g_key_trace) + ")").c_str()))
 			g_trace_requested = true;
-
-		ImGui::Separator();
-		ImGui::TextDisabled("Diagnostics (these hide lights)");
-		value = g_glow_off;
-		if (ImGui::Checkbox("Hide the light glow (cities, airports)", &value))
-			toggle(g_glow_off, "light glow removal");
-		value = g_point_off;
-		if (ImGui::Checkbox("Hide the light points", &value))
-			toggle(g_point_off, "light point removal");
 	}
 }
 
@@ -1085,8 +977,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		GetModuleFileNameW(nullptr, exe, MAX_PATH);
 		log("MSFS 2024 Camera FX Off %s (built %s %s, ReShade API %d)", CAMFX_VERSION_STRING, __DATE__, __TIME__, RESHADE_API_VERSION);
 		log("host %S", exe);
-		log("settings: sun_flare_off=%d bloom_off=%d light_glow_off=%d light_point_off=%d flare_keep=%s keys Ctrl+Shift+%s/%s/%s",
-			int(g_sun_flare_off.load()), int(g_bloom_off.load()), int(g_glow_off.load()), int(g_point_off.load()), kept_elements().c_str(),
+		log("settings: sun_flare_off=%d %s bloom_off=%d keys Ctrl+Shift+%s/%s/%s", int(g_sun_flare_off.load()), keep_text().c_str(), int(g_bloom_off.load()),
 			key_name(g_key_flare).c_str(), key_name(g_key_bloom).c_str(), key_name(g_key_trace).c_str());
 
 		reshade::register_event<reshade::addon_event::init_pipeline>(on_init_pipeline);

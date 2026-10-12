@@ -1,11 +1,11 @@
 // End-to-end test of the add-on inside a real ReShade, on WARP (software, the default) or on the GPU.
 // Runs from a folder holding a copy of ReShade's dxgi.dll and the add-on. It writes the add-on settings and a .twins file,
-// draws stand-ins of the MSFS shaders and reads the pixels back. The settings keep one of the two lens flare elements.
-//   fixture [--adapter=gpu] --sun-flare-off=1 --bloom-off=1 --light-glow-off=0 --light-point-off=0
-//       stand-in shader package with a no-bloom twin: checks the twin swap
+// draws stand-ins of the MSFS shaders and reads the pixels back.
+//   fixture [--adapter=gpu] --sun-flare-off=1 --bloom-off=1 [--keep-glow=1 --keep-star=0 --keep-ghosts=0]
+//       stand-in shader package with a no-bloom twin: checks the twin swap. Keep settings left out use the add-on defaults.
 //   fixture [--adapter=gpu] --real-pak=<SHADERSPAK.*.SM6.PC.PAK> --real-twins=<.twins> ...
-//       the game's shader package and twins file: also builds pipelines from the game's own light and tonemapping
-//       shaders and checks the add-on recognizes them and creates the real no-bloom twin (pipelines only, never drawn)
+//       the game's shader package and twins file: also builds a pipeline from the game's own bloom tonemapping shader and
+//       checks the add-on creates the real no-bloom twin (pipeline only, never drawn)
 
 #include "../src/classify.hpp"
 #include "../src/twins.hpp"
@@ -24,6 +24,7 @@
 #include "ps_light.h"
 #include "ps_material.h"
 #include "ps_material_b.h"
+#include "ps_material_c.h"
 #include "ps_tonemap_bloom.h"
 #include "ps_tonemap_plain.h"
 #include "vs_flare.h"
@@ -43,6 +44,11 @@ namespace
 		printf("%s: %s\n", condition ? "ok  " : "FAIL", what);
 		if (!condition)
 			++g_failures;
+	}
+
+	void check(bool condition, const std::string &what)
+	{
+		check(condition, what.c_str());
 	}
 
 	void require(HRESULT hr, const char *what)
@@ -86,17 +92,22 @@ namespace
 		return text;
 	}
 
+	// The log line holding 'needle', empty if there is none.
+	std::string log_line(const std::string &log, const std::string &needle)
+	{
+		const size_t at = log.find(needle);
+		if (at == std::string::npos)
+			return {};
+		const size_t begin = log.rfind('\n', at);
+		const size_t end = log.find('\n', at);
+		return log.substr(begin == std::string::npos ? 0 : begin + 1, end == std::string::npos ? std::string::npos : end - (begin == std::string::npos ? 0 : begin + 1));
+	}
+
 	std::string digest_hex(const unsigned char *code)
 	{
 		camfx::digest16 d;
 		dxbc::digest(code, 32, d.bytes);
 		return camfx::to_hex(d);
-	}
-
-	// The name the add-on gives a lens flare element: the first 8 hex digits of its vertex and pixel shader digests.
-	std::string element_tag(const unsigned char *vs, const unsigned char *ps)
-	{
-		return digest_hex(vs).substr(0, 8) + ":" + digest_hex(ps).substr(0, 8);
 	}
 
 	uint32_t container_size(const unsigned char *code)
@@ -125,12 +136,11 @@ namespace
 	};
 #pragma warning(pop)
 
-	// Shaders picked from the game's package, so their outputs and inputs link: light glow and light point vertex/pixel
-	// pairs (without the TAAMASK output), and one tonemapping permutation with bloom.
+	// The first tonemapping permutation with bloom in the game's shader package.
 	struct real_shaders
 	{
 		std::vector<uint8_t> pak;
-		const uint8_t *glow_vs = nullptr, *glow_ps = nullptr, *point_vs = nullptr, *point_ps = nullptr, *tonemap_ps = nullptr;
+		const uint8_t *tonemap_ps = nullptr;
 	};
 
 	bool load_real_shaders(const std::wstring &path, real_shaders &out)
@@ -153,7 +163,7 @@ namespace
 			return false;
 
 		const std::vector<uint8_t> &pak = out.pak;
-		for (size_t i = 0; i + 32 <= pak.size(); ++i)
+		for (size_t i = 0; i + 32 <= pak.size() && out.tonemap_ps == nullptr; ++i)
 		{
 			if (pak[i] != 'D' || std::memcmp(&pak[i], "DXBC", 4) != 0)
 				continue;
@@ -164,34 +174,18 @@ namespace
 			std::memcpy(&count, &pak[i + 28], 4);
 			if (major != 1 || count < 1 || count > 32 || container < 32 || i + container > pak.size())
 				continue;
-
-			const uint8_t *code = &pak[i];
-			const std::string_view entry = camfx::entry_point(code, container);
-			const dxbc::span osg = dxbc::find_part(code, container, dxbc::fourcc('O', 'S', 'G', '1'));
-			const dxbc::span isg = dxbc::find_part(code, container, dxbc::fourcc('I', 'S', 'G', '1'));
-			if (entry == "vh_billboard_lights" && !dxbc::contains_string(osg, "TAAMASK"))
-			{
-				const uint8_t *&slot = dxbc::contains_string(osg, "FlareUV") ? out.glow_vs : out.point_vs;
-				if (slot == nullptr)
-					slot = code;
-			}
-			if (entry == "ph_billboard_lights" && !dxbc::contains_string(isg, "TAAMASK"))
-			{
-				const uint8_t *&slot = dxbc::contains_string(isg, "FlareUV") ? out.glow_ps : out.point_ps;
-				if (slot == nullptr)
-					slot = code;
-			}
-			if (out.tonemap_ps == nullptr && camfx::classify_pixel_shader(code, container) == camfx::pso_kind::tonemap_bloom)
-				out.tonemap_ps = code;
+			if (camfx::classify_pixel_shader(&pak[i], container) == camfx::pso_kind::tonemap_bloom)
+				out.tonemap_ps = &pak[i];
 			i += container - 1;
 		}
-		return out.glow_vs && out.glow_ps && out.point_vs && out.point_ps && out.tonemap_ps;
+		return out.tonemap_ps != nullptr;
 	}
 }
 
 int wmain(int argc, wchar_t **argv)
 {
-	int sun_flare_off = 1, bloom_off = 1, glow_off = 0, point_off = 0;
+	// Keep settings at -1 are left out of the .ini, so the add-on uses its defaults.
+	int sun_flare_off = 1, bloom_off = 1, keep_glow = -1, keep_star = -1, keep_ghosts = -1;
 	bool gpu = false;
 	std::wstring real_pak, real_twins;
 	for (int i = 1; i < argc; ++i)
@@ -199,8 +193,9 @@ int wmain(int argc, wchar_t **argv)
 		const std::wstring arg = argv[i];
 		swscanf_s(argv[i], L"--sun-flare-off=%d", &sun_flare_off);
 		swscanf_s(argv[i], L"--bloom-off=%d", &bloom_off);
-		swscanf_s(argv[i], L"--light-glow-off=%d", &glow_off);
-		swscanf_s(argv[i], L"--light-point-off=%d", &point_off);
+		swscanf_s(argv[i], L"--keep-glow=%d", &keep_glow);
+		swscanf_s(argv[i], L"--keep-star=%d", &keep_star);
+		swscanf_s(argv[i], L"--keep-ghosts=%d", &keep_ghosts);
 		if (arg == L"--adapter=gpu")
 			gpu = true;
 		if (arg.rfind(L"--real-pak=", 0) == 0)
@@ -209,8 +204,11 @@ int wmain(int argc, wchar_t **argv)
 			real_twins = arg.substr(13);
 	}
 	const bool real = !real_pak.empty();
-	printf("fixture: %s, sun_flare_off=%d bloom_off=%d light_glow_off=%d light_point_off=%d%s\n",
-		gpu ? "GPU" : "WARP", sun_flare_off, bloom_off, glow_off, point_off, real ? ", game shaders" : "");
+	// What the add-on should use: only the glow is kept by default.
+	const bool glow_kept = keep_glow != 0, star_kept = keep_star > 0, ghosts_kept = keep_ghosts > 0;
+	printf("fixture: %s, sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d%s bloom_off=%d%s\n",
+		gpu ? "GPU" : "WARP", sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept),
+		keep_glow < 0 && keep_star < 0 && keep_ghosts < 0 ? " (defaults)" : "", bloom_off, real ? ", game shaders" : "");
 
 	// Add-on inputs, written before ReShade loads it.
 	const std::wstring dir = exe_directory();
@@ -224,7 +222,7 @@ int wmain(int argc, wchar_t **argv)
 		twins = read_text(real_twins);
 		std::string error;
 		require(camfx::parse_twin_table(twins, game_twins, error) ? S_OK : E_FAIL, "parse the game's .twins file");
-		require(load_real_shaders(real_pak, game) ? S_OK : E_FAIL, "find light and tonemapping shaders in the game's package");
+		require(load_real_shaders(real_pak, game) ? S_OK : E_FAIL, "find a bloom tonemapping shader in the game's package");
 	}
 	else
 	{
@@ -239,12 +237,15 @@ int wmain(int argc, wchar_t **argv)
 	}
 	require(write_file(dir + L"msfs2024-camera-fx-off.twins", twins.data(), twins.size()) ? S_OK : E_FAIL, "write .twins");
 
-	// Keep the second lens flare element. The other entries check the list parsing: the first names no pipeline, and the
-	// malformed ones must be ignored.
-	const std::string kept_element = element_tag(g_vs_material, g_ps_material_b);
-	const std::string ini = "[settings]\r\nsun_flare_off=" + std::to_string(sun_flare_off) + "\r\nbloom_off=" + std::to_string(bloom_off) +
-		"\r\nlight_glow_off=" + std::to_string(glow_off) + "\r\nlight_point_off=" + std::to_string(point_off) + "\r\npak_path=" + narrow(pak_path) +
-		"\r\nflare_keep=deadbeef:01234567, nonsense,,  " + kept_element + " ,0123:4567,0123456789:abcdef,00000000:00000000\r\n";
+	// Keys of earlier versions are in there too, and must do nothing (light_glow_off used to hide the lights).
+	std::string ini = "[settings]\r\nsun_flare_off=" + std::to_string(sun_flare_off) + "\r\nbloom_off=" + std::to_string(bloom_off) +
+		"\r\npak_path=" + narrow(pak_path) + "\r\nlight_glow_off=1\r\nlight_point_off=1\r\nflare_keep=" + digest_hex(g_vs_material).substr(0, 8) + ":" + digest_hex(g_ps_material_c).substr(0, 8) + "\r\n";
+	if (keep_glow >= 0)
+		ini += "keep_glow=" + std::to_string(keep_glow) + "\r\n";
+	if (keep_star >= 0)
+		ini += "keep_star=" + std::to_string(keep_star) + "\r\n";
+	if (keep_ghosts >= 0)
+		ini += "keep_ghosts=" + std::to_string(keep_ghosts) + "\r\n";
 	require(write_file(dir + L"msfs2024-camera-fx-off.ini", ini.data(), ini.size()) ? S_OK : E_FAIL, "write .ini");
 	DeleteFileW((dir + L"msfs2024-camera-fx-off.log").c_str());
 
@@ -309,9 +310,11 @@ int wmain(int argc, wchar_t **argv)
 	const ComPtr<ID3D12PipelineState> pso_glow = make_pso(root.Get(), g_vs_flare, g_ps_flare, ldr, none, "create stand-in light glow pipeline");
 	const ComPtr<ID3D12PipelineState> pso_point = make_pso(root.Get(), g_vs_light, g_ps_light, ldr, none, "create stand-in light point pipeline");
 	const ComPtr<ID3D12PipelineState> pso_tonemap = make_pso(root.Get(), g_vs_fullscreen, g_ps_tonemap_bloom, ldr, none, "create stand-in tonemapping pipeline");
-	const ComPtr<ID3D12PipelineState> pso_material = make_pso(root.Get(), g_vs_material, g_ps_material, hdr, none, "create stand-in material pipeline");
+	// Lens flare stand-ins: three elements with shaders the add-on does not know (A, B, C).
+	const ComPtr<ID3D12PipelineState> pso_material = make_pso(root.Get(), g_vs_material, g_ps_material, hdr, none, "create stand-in material pipeline A");
+	const ComPtr<ID3D12PipelineState> pso_material_b = make_pso(root.Get(), g_vs_material, g_ps_material_b, hdr, none, "create stand-in material pipeline B");
+	const ComPtr<ID3D12PipelineState> pso_material_c = make_pso(root.Get(), g_vs_material, g_ps_material_c, hdr, none, "create stand-in material pipeline C");
 	const ComPtr<ID3D12PipelineState> pso_material_depth = make_pso(root.Get(), g_vs_material, g_ps_material, hdr, depth, "create stand-in material pipeline with depth");
-	const ComPtr<ID3D12PipelineState> pso_material_b = make_pso(root.Get(), g_vs_material, g_ps_material_b, hdr, none, "create stand-in material pipeline (second lens flare element)");
 
 	// A second light glow pipeline built from a pipeline state stream.
 	struct
@@ -338,9 +341,9 @@ int wmain(int argc, wchar_t **argv)
 	ComPtr<ID3D12PipelineState> pso_glow_stream;
 	require(device->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&pso_glow_stream)), "CreatePipelineState (stream)");
 
-	// The game's own shaders, with a root signature that covers every register they use (they are never drawn).
+	// The game's own bloom tonemapping shader, with a root signature that covers every register it uses (it is never drawn).
 	ComPtr<ID3D12RootSignature> game_root;
-	ComPtr<ID3D12PipelineState> pso_game_glow, pso_game_point, pso_game_tonemap;
+	ComPtr<ID3D12PipelineState> pso_game_tonemap;
 	if (real)
 	{
 		const D3D12_DESCRIPTOR_RANGE resources[2] = {
@@ -354,18 +357,16 @@ int wmain(int argc, wchar_t **argv)
 		parameters[1].DescriptorTable = { 1, &samplers };
 		const D3D12_ROOT_SIGNATURE_DESC game_root_desc = { 2, parameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE };
 		ComPtr<ID3DBlob> blob;
-		require(D3D12SerializeRootSignature(&game_root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &root_error), "serialize root signature for the game's shaders");
-		require(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&game_root)), "CreateRootSignature (game shaders)");
-
-		pso_game_glow = make_pso(game_root.Get(), game.glow_vs, game.glow_ps, DXGI_FORMAT_R16G16B16A16_FLOAT, none, "create pipeline from the game's light glow shaders");
-		pso_game_point = make_pso(game_root.Get(), game.point_vs, game.point_ps, DXGI_FORMAT_R16G16B16A16_FLOAT, none, "create pipeline from the game's light point shaders");
+		require(D3D12SerializeRootSignature(&game_root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &root_error), "serialize root signature for the game's shader");
+		require(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&game_root)), "CreateRootSignature (game shader)");
 		pso_game_tonemap = make_pso(game_root.Get(), g_vs_fullscreen_tex, game.tonemap_ps, ldr, none, "create pipeline from the game's bloom tonemapping shader");
 	}
 
 	// Targets (4x4): light glow, light glow through ExecuteIndirect, light point, tonemap (LDR), then HDR ones for the
-	// material quads: no depth bound (lens flare), depth bound (transparent geometry), a 3-vertex draw, and a quad of the
-	// second lens flare element (kept).
-	enum : UINT { glow_target, glow_indirect_target, point_target, tonemap_target, flare_target, flare_depth_target, flare_triangle_target, flare_kept_target, targets };
+	// material quads:
+	// - the lens flare: one target bound once, then quads of A, B, C and C, each in its own column of pixels;
+	// - a quad with depth bound (transparent geometry) and a 3-vertex draw, both never lens flare.
+	enum : UINT { glow_target, glow_indirect_target, point_target, tonemap_target, flare_target, flare_depth_target, flare_triangle_target, targets };
 	constexpr UINT size = 4;
 	D3D12_HEAP_PROPERTIES default_heap = { D3D12_HEAP_TYPE_DEFAULT };
 	D3D12_HEAP_PROPERTIES upload_heap = { D3D12_HEAP_TYPE_UPLOAD };
@@ -448,7 +449,7 @@ int wmain(int argc, wchar_t **argv)
 	ComPtr<ID3D12CommandSignature> signature;
 	require(device->CreateCommandSignature(&signature_desc, nullptr, IID_PPV_ARGS(&signature)), "CreateCommandSignature");
 
-	// Record: each target gets one draw, as the game would issue them.
+	// Record the draws as the game would issue them.
 	D3D12_COMMAND_QUEUE_DESC queue_desc = { D3D12_COMMAND_LIST_TYPE_DIRECT };
 	ComPtr<ID3D12CommandQueue> queue;
 	require(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue)), "CreateCommandQueue");
@@ -496,15 +497,26 @@ int wmain(int argc, wchar_t **argv)
 	draw_into(tonemap_target, false, pso_tonemap.Get());
 	list->DrawInstanced(3, 1, 0, 0);
 
+	// The lens flare, as the game draws it: the target bound once, then the glow, the star rays and the ghosts.
 	list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	const auto quad_in_column = [&](UINT column) {
+		const D3D12_VIEWPORT one_column = { float(column), 0, 1, float(size), 0, 1 };
+		list->RSSetViewports(1, &one_column);
+		list->DrawInstanced(4, 1, 0, 0);
+	};
 	draw_into(flare_target, false, pso_material.Get());
-	list->DrawInstanced(4, 1, 0, 0);
+	quad_in_column(0);
+	list->SetPipelineState(pso_material_b.Get());
+	quad_in_column(1);
+	list->SetPipelineState(pso_material_c.Get());
+	quad_in_column(2);
+	quad_in_column(3);
+	list->RSSetViewports(1, &viewport);
+
 	draw_into(flare_depth_target, true, pso_material_depth.Get());
 	list->DrawInstanced(4, 1, 0, 0);
 	draw_into(flare_triangle_target, false, pso_material.Get());
 	list->DrawInstanced(3, 1, 0, 0);
-	draw_into(flare_kept_target, false, pso_material_b.Get());
-	list->DrawInstanced(4, 1, 0, 0);
 
 	for (UINT i = 0; i < targets; ++i)
 	{
@@ -529,24 +541,28 @@ int wmain(int argc, wchar_t **argv)
 	CloseHandle(done);
 	check(device->GetDeviceRemovedReason() == S_OK, "device not removed");
 
-	// Pixel (1, 1) of every target, as 4 bytes (RGBA8, or the packed R11G11B10 bits).
+	// Pixels as 4 bytes (RGBA8, or the packed R11G11B10 bits): (x, 1) of a target.
 	void *mapped = nullptr;
 	require(readback->Map(0, nullptr, &mapped), "map readback");
 	const auto *const pixels = static_cast<const unsigned char *>(mapped);
-	const auto pixel = [&](UINT i) { const unsigned char *p = pixels + i * size * row_pitch + row_pitch + 4; return std::vector<int> { p[0], p[1], p[2], p[3] }; };
+	const auto pixel = [&](UINT i, UINT x = 1) { const unsigned char *p = pixels + i * size * row_pitch + row_pitch + x * 4; return std::vector<int> { p[0], p[1], p[2], p[3] }; };
 	const auto show = [](const std::vector<int> &p) { char text[48]; snprintf(text, sizeof(text), "(%d, %d, %d, %d)", p[0], p[1], p[2], p[3]); return std::string(text); };
 
 	const std::vector<int> glow = pixel(glow_target), glow_indirect = pixel(glow_indirect_target), point = pixel(point_target), tonemap = pixel(tonemap_target);
-	const std::vector<int> flare = pixel(flare_target), flare_depth = pixel(flare_depth_target), flare_triangle = pixel(flare_triangle_target), flare_kept = pixel(flare_kept_target);
+	const std::vector<int> flare_glow = pixel(flare_target, 0), flare_star = pixel(flare_target, 1), flare_ghost_1 = pixel(flare_target, 2), flare_ghost_2 = pixel(flare_target, 3);
+	const std::vector<int> flare_depth = pixel(flare_depth_target), flare_triangle = pixel(flare_triangle_target);
 	printf("light glow %s, light glow (indirect) %s, light point %s, tonemap %s\n", show(glow).c_str(), show(glow_indirect).c_str(), show(point).c_str(), show(tonemap).c_str());
-	printf("material quad, no depth %s; with depth %s; triangle %s; kept element %s\n", show(flare).c_str(), show(flare_depth).c_str(), show(flare_triangle).c_str(), show(flare_kept).c_str());
+	printf("lens flare: glow %s, star rays %s, ghosts %s %s; material quad with depth %s; triangle %s\n", show(flare_glow).c_str(), show(flare_star).c_str(),
+		show(flare_ghost_1).c_str(), show(flare_ghost_2).c_str(), show(flare_depth).c_str(), show(flare_triangle).c_str());
 
 	const std::vector<int> nothing = { 0, 0, 0, 0 }, red = { 255, 0, 0, 255 }, green = { 0, 255, 0, 255 };
-	check(glow == (glow_off ? nothing : red), glow_off ? "light glow draw skipped (diagnostic)" : "light glow draw kept");
-	check(glow_indirect == (glow_off ? nothing : red), glow_off ? "light glow ExecuteIndirect skipped (diagnostic, stream pipeline)" : "light glow ExecuteIndirect kept (stream pipeline)");
-	check(point == (point_off ? nothing : green), point_off ? "light point draw skipped (diagnostic)" : "light point draw kept");
-	check(sun_flare_off ? flare == nothing : flare != nothing, sun_flare_off ? "lens flare quad (HDR target, no depth) skipped" : "lens flare quad kept");
-	check(flare_kept != nothing, sun_flare_off ? "lens flare quad of an element set to keep drawn" : "lens flare quad of the second element kept");
+	check(glow == red, "light glow draw kept");
+	check(glow_indirect == red, "light glow ExecuteIndirect kept (stream pipeline)");
+	check(point == green, "light point draw kept");
+	const auto drawn = [&](bool kept) { return std::string(!sun_flare_off ? "drawn (lens flare removal off)" : kept ? "kept" : "removed"); };
+	check((flare_glow != nothing) == (!sun_flare_off || glow_kept), "lens flare glow (first quad) " + drawn(glow_kept));
+	check((flare_star != nothing) == (!sun_flare_off || star_kept), "lens flare star rays (second quad) " + drawn(star_kept));
+	check((flare_ghost_1 != nothing) == (!sun_flare_off || ghosts_kept) && (flare_ghost_2 != nothing) == (!sun_flare_off || ghosts_kept), "lens flare ghosts (third and fourth quads) " + drawn(ghosts_kept));
 	check(flare_depth != nothing, "material quad with depth bound kept");
 	check(flare_triangle != nothing, "material 3-vertex draw kept");
 	const bool twin_ran = tonemap == std::vector<int> { 0, 0, 255, 255 };
@@ -564,8 +580,6 @@ int wmain(int argc, wchar_t **argv)
 		dxbc::digest(game.tonemap_ps, 32, bloom_digest.bytes);
 		const auto pair = game_twins.entries.find(bloom_digest);
 		check(pair != game_twins.entries.end(), "the game's bloom permutation is in the twins file");
-		check(log.find("pipeline: light_glow") != std::string::npos && log.find(digest_hex(game.glow_vs).substr(0, 8)) != std::string::npos, "add-on recognized the game's light glow vertex shader");
-		check(log.find("pipeline: light_point") != std::string::npos && log.find(digest_hex(game.point_vs).substr(0, 8)) != std::string::npos, "add-on recognized the game's light point vertex shader");
 		if (pair != game_twins.entries.end())
 			check(log.find("tonemapping " + digest_hex(game.tonemap_ps) + " uses no-bloom twin " + camfx::to_hex(pair->second.twin)) != std::string::npos,
 				"add-on created the game's no-bloom twin from the shader package");
@@ -575,13 +589,18 @@ int wmain(int argc, wchar_t **argv)
 		check(bloom_off ? twin_ran : bloom_ran, bloom_off ? "tonemapping ran the no-bloom twin read from the package" : "tonemapping kept the bloom permutation");
 		check(log.find("uses no-bloom twin") != std::string::npos, "add-on paired the bloom permutation with its twin");
 	}
-	if (sun_flare_off)
-		check(log.find("lens flare: skipping quads of VS:vh_base#") != std::string::npos, "add-on logged the lens flare pipeline it skips");
-	// The elements read from the settings come first (#1 and #2), so the one first drawn is #3; the second one is already listed.
-	check(log.find(" flare_keep=deadbeef:01234567," + kept_element + " ") != std::string::npos, "add-on read the lens flare elements to keep");
-	check(log.find("lens flare: element #3 is VS:vh_base#" + digest_hex(g_vs_material).substr(0, 8) + " PS:ph_base#" + digest_hex(g_ps_material).substr(0, 8)) != std::string::npos,
-		"add-on listed the lens flare element it saw");
-	check(log.find("lens flare: element #4") == std::string::npos, "only lens flare quads were listed as elements");
+
+	char settings[96];
+	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d bloom_off=%d ",
+		sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept), bloom_off);
+	check(log.find(settings) != std::string::npos, "add-on read the settings (only the glow kept unless set otherwise)");
+	// The stand-in elements are not in the add-on's table of known shaders, so it goes by draw order.
+	const auto element = [&](const unsigned char *ps, const char *part) {
+		const std::string line = log_line(log, "VS:vh_base#" + digest_hex(g_vs_material).substr(0, 8) + " PS:ph_base#" + digest_hex(ps).substr(0, 8) + " has shaders this version does not know");
+		return !line.empty() && line.find(std::string("so it is taken as the ") + part) != std::string::npos;
+	};
+	check(element(g_ps_material, "glow") && element(g_ps_material_b, "star rays") && element(g_ps_material_c, "ghosts"),
+		"add-on told the unknown lens flare elements apart by draw order, and logged it");
 	printf("---- add-on log ----\n%s--------------------\n", log.c_str());
 
 	printf(g_failures == 0 ? "PASS\n" : "FAILED (%d)\n", g_failures);

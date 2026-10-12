@@ -57,6 +57,7 @@ $shaders = @(
   @{ Name = 'vs_material'; Profile = 'vs_6_0'; Entry = 'vh_base'; Defines = @() },
   @{ Name = 'ps_material'; Profile = 'ps_6_0'; Entry = 'ph_base'; Defines = @() },
   @{ Name = 'ps_material_b'; Profile = 'ps_6_0'; Entry = 'ph_base'; Defines = @('-D', 'ALT') },
+  @{ Name = 'ps_material_c'; Profile = 'ps_6_0'; Entry = 'ph_base'; Defines = @('-D', 'ALT2') },
   @{ Name = 'ps_tonemap_bloom'; Profile = 'ps_6_0'; Entry = 'ph_tonemapping'; Defines = @('-D', 'WITH_BLOOM') },
   @{ Name = 'ps_tonemap_plain'; Profile = 'ps_6_0'; Entry = 'ph_tonemapping'; Defines = @() })
 foreach ($s in $shaders) {

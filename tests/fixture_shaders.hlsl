@@ -54,11 +54,14 @@ float4 vh_base(uint id : SV_VertexID) : SV_Position
 	return float4(corner, 0, 1);
 }
 
-// ALT: a second lens flare element, which the fixture asks the add-on to keep.
+// Three lens flare elements with shaders the add-on does not know, so it tells them apart by draw order:
+// the default one is drawn first (glow), ALT second (star rays), ALT2 after them (ghosts).
 float4 ph_base(float4 position : SV_Position) : SV_Target
 {
-#ifdef ALT
+#if defined(ALT)
 	return float4(0.25, 1, 0.5, 1);
+#elif defined(ALT2)
+	return float4(0.5, 0.25, 1, 1);
 #else
 	return float4(1, 0.5, 0.25, 1);
 #endif

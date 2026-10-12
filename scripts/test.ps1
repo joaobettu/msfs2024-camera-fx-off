@@ -33,7 +33,7 @@ if ($LASTEXITCODE -ne 0) { $failed++ }
 foreach ($run in @(
     @('--sun-flare-off=1', '--bloom-off=1'),
     @('--sun-flare-off=0', '--bloom-off=0'),
-    @('--sun-flare-off=1', '--bloom-off=1', '--light-glow-off=1', '--light-point-off=1'),
+    @('--sun-flare-off=1', '--bloom-off=1', '--keep-glow=0', '--keep-star=1', '--keep-ghosts=1'),
     @('--sun-flare-off=1', '--bloom-off=1', "--real-pak=$pak", "--real-twins=$twins"))) {
   $arguments = @($adapter) + @($run)
   Write-Host "== fixture $($arguments -join ' ')"
