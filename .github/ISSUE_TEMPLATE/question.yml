@@ -1,0 +1,16 @@
+name: Question or feedback
+description: Ask something about the add-on, or tell us how it works for you.
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: textarea
+    id: message
+    attributes:
+      label: Your question or feedback
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your setup
+      description: If it matters for the question. Include the sim (Steam or Microsoft Store), the ReShade version, upscaling, resolution and HDR.

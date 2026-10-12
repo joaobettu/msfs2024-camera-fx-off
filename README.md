@@ -167,7 +167,7 @@ What the tests cover:
 
 ## Credits and license
 
-- Author: PdPanoo. Bug reports and suggestions are welcome in the [issues](https://github.com/joaobettu/msfs2024-camera-fx-off/issues).
+- Author: PdPanoo. Bug reports and suggestions are welcome in the [issues](https://github.com/joaobettu/msfs2024-camera-fx-off/issues). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 - License: MIT, see [LICENSE](LICENSE).
 - Third-party code, under its own licenses:
   - ReShade 6.8.0 add-on SDK headers (`third_party/reshade`): BSD-3-Clause OR MIT, © Patrick Mours. See `third_party/reshade/LICENSE.txt`.

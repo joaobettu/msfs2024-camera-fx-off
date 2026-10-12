@@ -1,0 +1,17 @@
+name: Feature request
+description: Suggest an improvement or a new option.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: What the add-on should do, and why. A screenshot of what bothers you in the sim helps.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried?
+      description: Sim settings, other add-ons or workarounds you have tried, if any.

@@ -1,0 +1,90 @@
+name: Bug report
+description: Something doesn't work as described, or the sim looks wrong with the add-on.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. The add-on is in beta, so every report helps.
+        For a security problem, don't open an issue: use [Report a vulnerability](https://github.com/joaobettu/msfs2024-camera-fx-off/security/advisories/new) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      description: Where and when it happens (airport, time of day, camera view), and which of the add-on's options were on.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: addon-version
+    attributes:
+      label: Add-on version
+      description: The version in the ReShade overlay's Add-ons tab, or in the first line of the log.
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: input
+    id: reshade-version
+    attributes:
+      label: ReShade version
+      placeholder: "6.8.0, with full add-on support"
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Where you got the sim
+      options:
+        - Steam
+        - Microsoft Store / Xbox app
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: upscaling
+    attributes:
+      label: Upscaling and anti-aliasing
+      options:
+        - DLSS
+        - DLSS with frame generation
+        - FSR
+        - FSR with frame generation
+        - TAA
+        - Other or not sure
+    validations:
+      required: true
+  - type: input
+    id: display
+    attributes:
+      label: Resolution and HDR
+      placeholder: "3840x2160, HDR off"
+  - type: textarea
+    id: other-addons
+    attributes:
+      label: Other ReShade add-ons and effects
+      description: For example Glass Cockpit DLSS Fix, or the ReShade effects you have on.
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Drag msfs2024-camera-fx-off.log from the game folder here. The add-on rewrites it every time the sim starts, so take it right after the problem. It names the folder where the game is installed; edit that out if you prefer.
+        For a rendering problem, also press Ctrl+Shift+F7 while it is on screen and attach msfs2024-camera-fx-off.trace.txt.
+    validations:
+      required: true
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Ideally the same view with the add-on's option on and off.
