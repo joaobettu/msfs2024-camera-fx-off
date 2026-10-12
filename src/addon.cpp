@@ -65,6 +65,13 @@ namespace
 		return w;
 	}
 
+	// A path without its folders. The log only names files, so it never shows where the user installed the game,
+	// which matters since people attach it to public bug reports.
+	std::wstring file_name(const std::wstring &path)
+	{
+		return path.substr(path.find_last_of(L"\\/") + 1);
+	}
+
 	void load_settings()
 	{
 		const auto get = [](const wchar_t *key, int def) { return int(GetPrivateProfileIntW(L"settings", key, def, g_ini_path.c_str())); };
@@ -250,12 +257,12 @@ namespace
 		std::string text, error;
 		if (!camfx::read_file(g_twins_path, text))
 		{
-			log("twins: %S not found, bloom removal unavailable (run tools\\gen_twins.ps1)", g_twins_path.c_str());
+			log("twins: %S not found next to the add-on, bloom removal unavailable (run tools\\gen_twins.ps1)", file_name(g_twins_path).c_str());
 			return;
 		}
 		if (!camfx::parse_twin_table(text, g_twins, error))
 		{
-			log("twins: %S: %s", g_twins_path.c_str(), error.c_str());
+			log("twins: %S: %s", file_name(g_twins_path).c_str(), error.c_str());
 			return;
 		}
 
@@ -275,7 +282,8 @@ namespace
 		WIN32_FILE_ATTRIBUTE_DATA attributes;
 		if (!GetFileAttributesExW(g_pak_path.c_str(), GetFileExInfoStandard, &attributes))
 		{
-			log("twins: shader package %S not found (sim updated? run tools\\gen_twins.ps1 again)", g_pak_path.c_str());
+			log("twins: shader package %S not found %s (sim updated? run tools\\gen_twins.ps1 again)", file_name(g_pak_path).c_str(),
+				g_pak_override.empty() ? "in the game's Shaders folder" : "at the pak_path from the settings");
 			return;
 		}
 		const uint64_t size = (uint64_t(attributes.nFileSizeHigh) << 32) | attributes.nFileSizeLow;
@@ -286,7 +294,7 @@ namespace
 		}
 
 		g_twins_ok = true;
-		log("twins: %zu pairs for %S", g_twins.entries.size(), g_pak_path.c_str());
+		log("twins: %zu pairs for %S", g_twins.entries.size(), file_name(g_pak_path).c_str());
 	}
 
 	uint64_t create_twin(device *dev, pipeline_layout layout, uint32_t count, const pipeline_subobject *subobjects, const shader_desc &ps)
@@ -430,7 +438,7 @@ namespace
 		FILE *file = _wfsopen(g_trace_path.c_str(), L"w", _SH_DENYWR);
 		if (file == nullptr)
 		{
-			log("trace: cannot write %S", g_trace_path.c_str());
+			log("trace: cannot write %S", file_name(g_trace_path).c_str());
 			return;
 		}
 		fprintf(file, "# MSFS 2024 Camera FX Off %s frame trace: sun_flare_off=%d %s bloom_off=%d, %zu lines%s\n",
@@ -439,7 +447,7 @@ namespace
 		for (const std::string &line : lines)
 			fprintf(file, "%s\n", line.c_str());
 		fclose(file);
-		log("trace: wrote %zu lines to %S", lines.size(), g_trace_path.c_str());
+		log("trace: wrote %zu lines to %S", lines.size(), file_name(g_trace_path).c_str());
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -976,7 +984,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		wchar_t exe[MAX_PATH] = L"";
 		GetModuleFileNameW(nullptr, exe, MAX_PATH);
 		log("MSFS 2024 Camera FX Off %s (built %s %s, ReShade API %d)", CAMFX_VERSION_STRING, __DATE__, __TIME__, RESHADE_API_VERSION);
-		log("host %S", exe);
+		log("host %S", file_name(exe).c_str());
 		log("settings: sun_flare_off=%d %s bloom_off=%d keys Ctrl+Shift+%s/%s/%s", int(g_sun_flare_off.load()), keep_text().c_str(), int(g_bloom_off.load()),
 			key_name(g_key_flare).c_str(), key_name(g_key_bloom).c_str(), key_name(g_key_trace).c_str());
 

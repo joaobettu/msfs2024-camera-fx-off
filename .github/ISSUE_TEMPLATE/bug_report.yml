@@ -79,7 +79,7 @@ body:
     attributes:
       label: Log
       description: |
-        Drag msfs2024-camera-fx-off.log from the game folder here. The add-on rewrites it every time the sim starts, so take it right after the problem. It names the folder where the game is installed; edit that out if you prefer.
+        Drag msfs2024-camera-fx-off.log from the game folder here. The add-on rewrites it every time the sim starts, so take it right after the problem.
         For a rendering problem, also press Ctrl+Shift+F7 while it is on screen and attach msfs2024-camera-fx-off.trace.txt.
     validations:
       required: true

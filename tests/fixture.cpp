@@ -590,6 +590,9 @@ int wmain(int argc, wchar_t **argv)
 		check(log.find("uses no-bloom twin") != std::string::npos, "add-on paired the bloom permutation with its twin");
 	}
 
+	// People attach the log to public bug reports: it names files only, never the folders they are in.
+	check(log.find(":\\") == std::string::npos && log.find(":/") == std::string::npos, "the log names no folders");
+
 	char settings[96];
 	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d bloom_off=%d ",
 		sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept), bloom_off);

@@ -10,7 +10,6 @@ What helps the most:
 
 - **The log**, `msfs2024-camera-fx-off.log`, from the game folder.
   - The add-on rewrites it every time the sim starts, so take it right after the problem.
-  - It names the folder where the game is installed. Edit that out if you prefer.
 - **A one-frame trace** for rendering problems: press Ctrl+Shift+F7 while the problem is on screen, then attach `msfs2024-camera-fx-off.trace.txt`.
 - **Your setup:**
   - the sim version (Steam or Microsoft Store);
