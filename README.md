@@ -34,7 +34,7 @@ Still images: lens flare [on](docs/images/lens_flare_on.jpg) and [off](docs/imag
 
 ## Installation (with the sim closed)
 
-Get the two files from the [latest release](https://github.com/joaobettu/msfs2024-camera-fx-off/releases), or from `build\` if you build the add-on yourself. Copy them into the game folder, the one that holds `FlightSimulator2024.exe` and ReShade's `dxgi.dll` (for the Steam version, `steamapps\common\Limitless`):
+Download the zip from the [latest release](https://github.com/joaobettu/msfs2024-camera-fx-off/releases) (or use `build\` if you build the add-on yourself). Copy these two files into the game folder, the one that holds `FlightSimulator2024.exe` and ReShade's `dxgi.dll` (for the Steam version, `steamapps\common\Limitless`):
 
 - `msfs2024-camera-fx-off.addon64`
 - `msfs2024-camera-fx-off.twins` (the shader pairs for the bloom removal; without it, only the lens flare removal works)
