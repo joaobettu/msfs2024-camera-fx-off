@@ -17,7 +17,7 @@ The lights themselves stay: only the camera-like effects drawn over them go away
 
 Each GIF alternates between the sim's own look ("On") and the look with the add-on and its default settings ("Off").
 
-**Lens flare.** The star rays and the ghosts are gone, and the glow around the sun stays.
+**Lens flare.** The glow, the star rays and the ghosts around the sun are all gone.
 
 ![Lens flare on and off](docs/images/lens_flare.gif)
 
