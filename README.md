@@ -38,7 +38,7 @@ Still images: lens flare [on](docs/images/lens_flare_on.jpg) and [off](docs/imag
 ## Requirements
 
 - ReShade 6.8 or newer, the version **with full add-on support**.
-- Microsoft Flight Simulator 2024 (DirectX 12). Tested with the Steam version.
+- Microsoft Flight Simulator 2024 (DirectX 12). Tested with the Steam version, before and after Sim Update 7.
   - The star ray removal uses the `Dxcompiler.DLL` that comes with the sim, next to its executable, to rebuild the light shaders on your machine. Without it, the star rays stay.
 - Works alongside other add-ons, such as *Glass Cockpit DLSS Fix*.
 
@@ -57,10 +57,9 @@ To uninstall, delete those files and the ones the add-on creates next to them (`
 |---|---|
 | Ctrl+Shift+F5 | turns the lens flare removal on or off |
 | Ctrl+Shift+F6 | turns the bloom removal on or off |
-| Ctrl+Shift+F7 | records a one-frame trace to `msfs2024-camera-fx-off.trace.txt` |
-| Ctrl+Shift+F8 | turns the star ray removal on lights on or off |
+| Ctrl+Shift+F7 | turns the star ray removal on lights on or off |
 
-The same options are in the ReShade overlay, **Add-ons** tab, along with counters per second.
+The same options are in the ReShade overlay, **Add-ons** tab, along with counters per second. The overlay also has the **Record a one-frame trace** button, which writes `msfs2024-camera-fx-off.trace.txt` for bug reports.
 
 ### Keeping part of the lens flare
 
@@ -96,11 +95,11 @@ Your choices are saved in `msfs2024-camera-fx-off.ini`, next to the add-on, in t
 | `bloom_off` | `1` | remove bloom and lens dirt |
 | `light_star_off` | `1` | remove the star rays on lights |
 | `light_glow_size` | `50` | size of the glow left around lights, in percent of the game's: `100`, `75`, `50`, `35` or `25` |
-| `key_flare`, `key_bloom`, `key_trace`, `key_light_star` | `116`, `117`, `118`, `119` (F5, F6, F7, F8) | shortcut keys, pressed with Ctrl+Shift, as Windows virtual-key codes |
+| `key_flare`, `key_bloom`, `key_light_star` | `116`, `117`, `118` (F5, F6, F7) | shortcut keys, pressed with Ctrl+Shift, as Windows virtual-key codes |
 | `pak_path` | (empty) | full path of the game's `SHADERSPAK.*.SM6.PC.PAK`, if it is not in the `Shaders` folder next to the game executable |
 | `dxcompiler_path` | (empty) | full path of the game's `Dxcompiler.DLL`, if it is not next to the game executable |
 
-Keys from earlier versions (`flare_keep`, `light_glow_off`, `light_point_off`) are ignored, and removed from the file the next time you change an option.
+Keys from earlier versions (`flare_keep`, `light_glow_off`, `light_point_off`, `key_trace`) are ignored, and removed from the file the next time you change an option.
 
 The log, `msfs2024-camera-fx-off.log`, is rewritten every time the sim starts. It shows:
 
@@ -131,7 +130,7 @@ The bloom removal depends on a table of pairs made for the current shader packag
 powershell -ExecutionPolicy Bypass -File tools\gen_twins.ps1
 ```
 
-The script finds the Steam version of the game on its own. For other installs, add `-GamePath "<folder that holds FlightSimulator2024.exe>"`.
+The script finds the Steam version of the game on its own. For other installs, add `-GamePath "<game folder>"`, the folder with the game's `Shaders` folder and `Dxcompiler.DLL`.
 
 Then copy the new `build\msfs2024-camera-fx-off.twins` into the game folder. The tool only reads the game files, and it refuses to write the table if any pair is ambiguous.
 
@@ -156,7 +155,7 @@ Everything is done through ReShade events, with no hooks of its own.
   - Three kinds of shaders draw that glow:
     - `ph_billboard_lights`, for city and airport lights;
     - `ph_macro_lights`, the permutation that reads `UV`, for aircraft lights;
-    - a `ph_base` light flare drawn after upscaling, over the lights of aircraft that use the older light effects. Only 2 of the 3078 `ph_base` shaders in the package match its resources and inputs.
+    - a `ph_base` light flare drawn after upscaling, over the lights of aircraft that use the older light effects. Only 2 of the about 3080 `ph_base` shaders in the package match its resources and inputs.
   - Each samples a texture whose `.y` channel holds the star. The add-on finds that channel by the code around it: an angular term ending in `+ 0.4` for the first two, `0.9 * star + 0.1` for the flare.
   - The rebuild uses the game's own `Dxcompiler.DLL`:
     1. Disassemble the shader.
@@ -187,12 +186,12 @@ powershell -ExecutionPolicy Bypass -File tools\gen_twins.ps1
 powershell -ExecutionPolicy Bypass -File scripts\test.ps1
 ```
 
-The scripts look for the game in your Steam libraries. For other installs (such as the Microsoft Store version), pass `-GamePath` with the folder that holds `FlightSimulator2024.exe`. `build.ps1` also takes `-ReShadeDll`, the path of ReShade's `dxgi.dll`, which otherwise comes from the game folder.
+The scripts look for the game in your Steam libraries. For other installs (such as the Microsoft Store version), pass `-GamePath` with the game folder, the one with the `Shaders` folder and `Dxcompiler.DLL`. `build.ps1` also takes `-ReShadeDll`, the path of ReShade's `dxgi.dll`, which otherwise comes from the game folder.
 
 What the tests cover:
 
 - `classify_test` runs against the real `SHADERSPAK`, read-only.
-  - It checks the counts: 770 tonemaps, 384 of them with bloom. These are the counts for the shader package the add-on was tested with (`SHADERSPAK.d5d2118d.SM6.PC.PAK`); a sim update may change them.
+  - It checks the counts: 770 tonemaps, 384 of them with bloom. These are the counts for the shader packages the add-on was tested with (`SHADERSPAK.d5d2118d.SM6.PC.PAK`, before and after Sim Update 7, which rebuilt it under the same name); a sim update may change them.
   - It checks that the 5 lens flare elements the add-on knows are in that package, as `vh_base`/`ph_base` pipelines, each with its part.
   - It validates every pair in the table.
   - It checks that the light shaders are recognized: 3 for city and airport lights, 2 for aircraft lights and 2 light flares.

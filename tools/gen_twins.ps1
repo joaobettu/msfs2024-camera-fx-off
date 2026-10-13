@@ -10,7 +10,7 @@ Candidates are compared with a sequence diff, and the script refuses to write a 
 Only reads the game files: the disassembler is a copy of the game's dxcompiler.dll in build\tools.
 #>
 param(
-  # The folder that holds FlightSimulator2024.exe; found in the Steam libraries when left out.
+  # The game folder (the one with the Shaders folder and Dxcompiler.DLL); found in the Steam libraries when left out.
   [string]$GamePath = '',
   [string]$Out = (Join-Path $PSScriptRoot '..\build\msfs2024-camera-fx-off.twins')
 )

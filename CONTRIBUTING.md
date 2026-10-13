@@ -10,7 +10,7 @@ What helps the most:
 
 - **The log**, `msfs2024-camera-fx-off.log`, from the game folder.
   - The add-on rewrites it every time the sim starts, so take it right after the problem.
-- **A one-frame trace** for rendering problems: press Ctrl+Shift+F7 while the problem is on screen, then attach `msfs2024-camera-fx-off.trace.txt`.
+- **A one-frame trace** for rendering problems: while the problem is on screen, click **Record a one-frame trace** in the ReShade overlay (**Add-ons** tab), then attach `msfs2024-camera-fx-off.trace.txt`.
 - **Your setup:**
   - the sim version (Steam or Microsoft Store);
   - the ReShade version;

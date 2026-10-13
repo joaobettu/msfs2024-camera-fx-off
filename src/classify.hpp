@@ -47,8 +47,9 @@ namespace camfx
 	}
 
 	// The light flare ph_base shaders bind exactly two constant buffers (b0, b1), a sampler (s0), a 2D texture at t0 (the
-	// flare), a texture at t1 and a 3D texture at t2, and read TEXSPACE_POS and PREVIOUS_POSITION: in the shader package of
-	// October 2026, only the two light flare permutations of its 3078 ph_base shaders do.
+	// flare), a texture at t1 and a 3D texture at t2, and read TEXSPACE_POS and PREVIOUS_POSITION: in the shader packages of
+	// October 2026, before and after Sim Update 7, only the two light flare permutations of their 3078 and 3082 ph_base
+	// shaders do.
 	inline bool is_light_flare(const void *code, size_t code_size, const dxbc::psv0 &psv)
 	{
 		using dxbc::resource_type;

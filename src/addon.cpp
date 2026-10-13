@@ -54,8 +54,9 @@ namespace
 	// Size of the glow left around those lights, as an index in dxil::glow_sizes (the game's size first): 50% by default.
 	// Stored in percent.
 	std::atomic<uint32_t> g_light_glow_size { 2 };
-	// Pressed together with Ctrl+Shift. F9 to F12 are taken by the Glass Cockpit DLSS Fix add-on.
-	UINT g_key_flare = VK_F5, g_key_bloom = VK_F6, g_key_trace = VK_F7, g_key_light_star = VK_F8;
+	// Pressed together with Ctrl+Shift. F9 to F12 are taken by the Glass Cockpit DLSS Fix add-on. The frame trace has no
+	// shortcut: it is recorded from the overlay.
+	UINT g_key_flare = VK_F5, g_key_bloom = VK_F6, g_key_light_star = VK_F7;
 
 	std::wstring g_ini_path, g_log_path, g_trace_path, g_twins_path, g_pak_override, g_dxcompiler_override;
 
@@ -99,8 +100,7 @@ namespace
 		g_light_glow_size = nearest;
 		g_key_flare = UINT(get(L"key_flare", VK_F5));
 		g_key_bloom = UINT(get(L"key_bloom", VK_F6));
-		g_key_trace = UINT(get(L"key_trace", VK_F7));
-		g_key_light_star = UINT(get(L"key_light_star", VK_F8));
+		g_key_light_star = UINT(get(L"key_light_star", VK_F7));
 
 		wchar_t path[MAX_PATH] = L"";
 		GetPrivateProfileStringW(L"settings", L"pak_path", L"", path, MAX_PATH, g_ini_path.c_str());
@@ -119,7 +119,7 @@ namespace
 		put(L"light_star_off", g_light_star_off);
 		WritePrivateProfileStringW(L"settings", L"light_glow_size", std::to_wstring(dxil::glow_sizes[g_light_glow_size]).c_str(), g_ini_path.c_str());
 		// Keys of earlier versions
-		for (const wchar_t *const key : { L"flare_keep", L"light_glow_off", L"light_point_off" })
+		for (const wchar_t *const key : { L"flare_keep", L"light_glow_off", L"light_point_off", L"key_trace" })
 			WritePrivateProfileStringW(L"settings", key, nullptr, g_ini_path.c_str());
 	}
 
@@ -500,7 +500,7 @@ namespace
 	}
 
 	// ---------------------------------------------------------------------------------------------
-	// Per command list state, and the frame trace (Ctrl+Shift+F7): pipeline binds, render targets, draws and dispatches
+	// Per command list state, and the frame trace (from the overlay): pipeline binds, render targets, draws and dispatches
 	// recorded between two presents
 
 	struct __declspec(uuid("2f9c1b7e-4a3d-4c8e-9b1f-6e2d8a0c5b71")) cmd_state
@@ -1080,8 +1080,6 @@ namespace
 				toggle(g_bloom_off, "bloom removal");
 			if (runtime->is_key_pressed(g_key_light_star))
 				toggle(g_light_star_off, "light star ray removal");
-			if (runtime->is_key_pressed(g_key_trace))
-				g_trace_requested = true;
 		}
 
 		update_rates();
@@ -1152,7 +1150,7 @@ namespace
 			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Bloom: %u no-bloom tonemap pipeline(s) could not be created (see the log)", g_twin_failed.load());
 
 		ImGui::Spacing();
-		if (ImGui::Button(("Record a one-frame trace (Ctrl+Shift+" + key_name(g_key_trace) + ")").c_str()))
+		if (ImGui::Button("Record a one-frame trace"))
 			g_trace_requested = true;
 	}
 }
@@ -1182,9 +1180,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		GetModuleFileNameW(nullptr, exe, MAX_PATH);
 		log("MSFS 2024 Camera FX Off %s (built %s %s, ReShade API %d)", CAMFX_VERSION_STRING, __DATE__, __TIME__, RESHADE_API_VERSION);
 		log("host %S", file_name(exe).c_str());
-		log("settings: sun_flare_off=%d %s bloom_off=%d %s keys Ctrl+Shift+%s/%s/%s/%s", int(g_sun_flare_off.load()), keep_text().c_str(),
-			int(g_bloom_off.load()), lights_text().c_str(), key_name(g_key_flare).c_str(), key_name(g_key_bloom).c_str(), key_name(g_key_light_star).c_str(),
-			key_name(g_key_trace).c_str());
+		log("settings: sun_flare_off=%d %s bloom_off=%d %s keys Ctrl+Shift+%s/%s/%s", int(g_sun_flare_off.load()), keep_text().c_str(),
+			int(g_bloom_off.load()), lights_text().c_str(), key_name(g_key_flare).c_str(), key_name(g_key_bloom).c_str(), key_name(g_key_light_star).c_str());
 
 		reshade::register_event<reshade::addon_event::init_pipeline>(on_init_pipeline);
 		reshade::register_event<reshade::addon_event::destroy_pipeline>(on_destroy_pipeline);

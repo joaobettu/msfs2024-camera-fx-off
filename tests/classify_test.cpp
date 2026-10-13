@@ -254,10 +254,12 @@ int wmain(int argc, wchar_t **argv)
 		}
 	}
 
-	// Numbers from the analysis of this exact package (sim version of October 2026).
-	if (pak_path.find(L"SHADERSPAK.d5d2118d.SM6.PC.PAK") != std::wstring::npos)
+	// Numbers from the analysis of these exact packages. Sim Update 7 rebuilt the package under the same name, so they are
+	// told apart by size.
+	const size_t expected_containers = pak.size() == 188778589 ? 8350 : pak.size() == 188454213 ? 8334 : 0;
+	if (pak_path.find(L"SHADERSPAK.d5d2118d.SM6.PC.PAK") != std::wstring::npos && expected_containers != 0)
 	{
-		check(containers.size() == 8350, "8350 containers");
+		check(containers.size() == expected_containers, std::to_string(expected_containers) + " containers (" + (expected_containers == 8350 ? "before" : "since") + " Sim Update 7)");
 		check(tonemap == 770 && bloom == 384, "770 tonemapping permutations, 384 with bloom");
 		size_t billboard = 0, macro = 0;
 		for (const container &c : light_glows)
@@ -268,7 +270,7 @@ int wmain(int argc, wchar_t **argv)
 		}
 		check(billboard == 3 && macro == 2 && light_glows.size() == 5, "5 light glow pixel shaders: 3 for city and airport lights, 2 for aircraft lights");
 		const auto flare = [&](size_t i) { return light_flares.size() > i ? camfx::to_hex(digest_of(pak.data() + light_flares[i].offset, light_flares[i].size)).substr(0, 8) : std::string(); };
-		check(light_flares.size() == 2 && flare(0) == "2b398c27" && flare(1) == "979163b3", "2 light flare pixel shaders, 2b398c27 and 979163b3 (of 3078 ph_base)");
+		check(light_flares.size() == 2 && flare(0) == "2b398c27" && flare(1) == "979163b3", "2 light flare pixel shaders, 2b398c27 and 979163b3 (of about 3080 ph_base)");
 
 		size_t found = 0;
 		for (const flare_element &e : flare_elements)

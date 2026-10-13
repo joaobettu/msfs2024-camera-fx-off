@@ -732,9 +732,9 @@ int wmain(int argc, wchar_t **argv)
 	check(log.find(":\\") == std::string::npos && log.find(":/") == std::string::npos, "the log names no folders");
 
 	char settings[160];
-	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d bloom_off=%d light_star_off=%d light_glow_size=%d ",
+	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d bloom_off=%d light_star_off=%d light_glow_size=%d keys Ctrl+Shift+F5/F6/F7\r\n",
 		sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept), bloom_off, int(stars_removed), glow_size);
-	check(log.find(settings) != std::string::npos, "add-on read the settings (no lens flare part kept unless set otherwise)");
+	check(log.find(settings) != std::string::npos, "add-on read the settings (no lens flare part kept unless set otherwise; shortcuts F5, F6 and F7)");
 	// The stand-in elements are not in the add-on's table of known shaders, so it goes by draw order.
 	const auto element = [&](const unsigned char *ps, const char *part) {
 		const std::string line = log_line(log, "VS:vh_base#" + digest_hex(g_vs_material).substr(0, 8) + " PS:ph_base#" + digest_hex(ps).substr(0, 8) + " has shaders this version does not know");

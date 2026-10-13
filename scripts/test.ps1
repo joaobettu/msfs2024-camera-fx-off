@@ -10,7 +10,7 @@ Runs the fixture on the graphics card instead. Refuses to while the sim is runni
 Allows -Gpu with the sim running (the fixture only draws a few 4x4 targets).
 #>
 param(
-  # The folder that holds FlightSimulator2024.exe; found in the Steam libraries when left out.
+  # The game folder (the one with the Shaders folder and Dxcompiler.DLL); found in the Steam libraries when left out.
   [string]$GamePath = '',
   [switch]$Gpu,
   [switch]$Force
@@ -20,7 +20,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'find-game.ps1')
 if (-not $GamePath) { $GamePath = Find-GamePath }
 
-if ($Gpu -and -not $Force -and (Get-Process -Name FlightSimulator2024 -ErrorAction SilentlyContinue)) { throw 'the sim is running: GPU tests only run with it closed (or pass -Force)' }
+if ($Gpu -and -not $Force -and (Get-SimProcess).Count -ne 0) { throw 'the sim is running: GPU tests only run with it closed (or pass -Force)' }
 
 $build = Join-Path (Split-Path $PSScriptRoot) 'build'
 $pak = @(Get-ChildItem (Join-Path $GamePath 'Shaders') -Filter 'SHADERSPAK.*.SM6.PC.PAK')[0].FullName
