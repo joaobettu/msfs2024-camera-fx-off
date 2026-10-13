@@ -1,4 +1,4 @@
-// Recognizes the MSFS 2024 shaders this add-on acts on, by entry point and bindings rather than by hash,
+// Recognizes the MSFS 2024 shaders this add-on acts on, by entry point, signature and bindings rather than by hash,
 // so a sim update that recompiles them keeps matching as long as Asobo keeps the names.
 // The parts of the lens flare are the exception: they share their shaders' names, so they are told apart by digest,
 // with the order the engine draws them in as a fallback.
@@ -16,9 +16,15 @@ namespace camfx
 		// Generic material shaders. The lens flare elements (sun glow, star rays, ghosts) are quads drawn with these right
 		// after upscaling, which the add-on tells apart by draw and render target (see the draw filter).
 		material,
+		// The glow sprite of a light: the billboard light pixel shader that reads 'FlareUV' (city and airport lights), and the
+		// macro light pixel shader that reads 'UV' (aircraft lights). Their light shape texture holds the glow and the star rays.
+		light_glow,
+		// The flare sprite over aircraft lights, drawn after upscaling with a ph_base material shader: a star over a dim round
+		// glow. Told apart from the thousands of other ph_base shaders by its resources and inputs (see is_light_flare).
+		light_flare,
 	};
 
-	constexpr size_t pso_kind_count = 3;
+	constexpr size_t pso_kind_count = 5;
 
 	inline const char *kind_name(pso_kind kind)
 	{
@@ -26,6 +32,8 @@ namespace camfx
 		{
 		case pso_kind::tonemap_bloom: return "tonemap_bloom";
 		case pso_kind::material: return "material";
+		case pso_kind::light_glow: return "light_glow";
+		case pso_kind::light_flare: return "light_flare";
 		default: return "none";
 		}
 	}
@@ -38,20 +46,49 @@ namespace camfx
 		return psv.entry;
 	}
 
+	// The light flare ph_base shaders bind exactly two constant buffers (b0, b1), a sampler (s0), a 2D texture at t0 (the
+	// flare), a texture at t1 and a 3D texture at t2, and read TEXSPACE_POS and PREVIOUS_POSITION: in the shader package of
+	// October 2026, only the two light flare permutations of its 3078 ph_base shaders do.
+	inline bool is_light_flare(const void *code, size_t code_size, const dxbc::psv0 &psv)
+	{
+		using dxbc::resource_type;
+		if (psv.resource_count != 6 || !dxbc::binds(psv, resource_type::cbv, 0, 0) || !dxbc::binds(psv, resource_type::cbv, 0, 1) ||
+			!dxbc::binds(psv, resource_type::sampler, 0, 0) || !dxbc::binds(psv, resource_type::srv_typed, 0, 0) ||
+			!dxbc::binds(psv, resource_type::srv_typed, 0, 1) || !dxbc::binds(psv, resource_type::srv_typed, 0, 2))
+			return false;
+		if (dxbc::resource_kind(psv, resource_type::srv_typed, 0, 0) != 2 || dxbc::resource_kind(psv, resource_type::srv_typed, 0, 2) != 4)
+			return false;
+		const dxbc::span inputs = dxbc::find_part(code, code_size, dxbc::fourcc('I', 'S', 'G', '1'));
+		return dxbc::contains_string(inputs, "TEXSPACE_POS") && dxbc::contains_string(inputs, "PREVIOUS_POSITION");
+	}
+
 	inline pso_kind classify_pixel_shader(const void *code, size_t code_size)
 	{
 		dxbc::psv0 psv;
-		if (!dxbc::parse_psv0(dxbc::find_part(code, code_size, dxbc::fourcc('P', 'S', 'V', '0')), psv) || psv.entry != "ph_tonemapping")
+		if (!dxbc::parse_psv0(dxbc::find_part(code, code_size, dxbc::fourcc('P', 'S', 'V', '0')), psv))
 			return pso_kind::none;
 		// All 384 bloom permutations bind the lens dirt texture at t8 (space 0); the 384 without bloom don't.
-		return dxbc::binds(psv, dxbc::resource_type::srv_typed, 0, 8) ? pso_kind::tonemap_bloom : pso_kind::none;
+		if (psv.entry == "ph_tonemapping")
+			return dxbc::binds(psv, dxbc::resource_type::srv_typed, 0, 8) ? pso_kind::tonemap_bloom : pso_kind::none;
+		if (psv.entry == "ph_billboard_lights")
+			return dxbc::contains_string(dxbc::find_part(code, code_size, dxbc::fourcc('I', 'S', 'G', '1')), "FlareUV") ? pso_kind::light_glow : pso_kind::none;
+		// The other ph_macro_lights permutations light the scene around the lights (they read a cone and a direction instead).
+		if (psv.entry == "ph_macro_lights")
+			return dxbc::contains_string(dxbc::find_part(code, code_size, dxbc::fourcc('I', 'S', 'G', '1')), "UV") ? pso_kind::light_glow : pso_kind::none;
+		if (psv.entry == "ph_base")
+			return is_light_flare(code, code_size, psv) ? pso_kind::light_flare : pso_kind::none;
+		return pso_kind::none;
 	}
 
 	// vs and ps may be null when the pipeline lacks that stage.
 	inline pso_kind classify_pipeline(const void *vs, size_t vs_size, const void *ps, size_t ps_size)
 	{
-		if (ps != nullptr && classify_pixel_shader(ps, ps_size) == pso_kind::tonemap_bloom)
-			return pso_kind::tonemap_bloom;
+		if (ps != nullptr)
+		{
+			const pso_kind kind = classify_pixel_shader(ps, ps_size);
+			if (kind != pso_kind::none)
+				return kind;
+		}
 		if (vs != nullptr && ps != nullptr && entry_point(vs, vs_size) == "vh_base" && entry_point(ps, ps_size) == "ph_base")
 			return pso_kind::material;
 		return pso_kind::none;

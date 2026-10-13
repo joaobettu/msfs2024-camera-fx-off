@@ -55,6 +55,8 @@ $shaders = @(
   @{ Name = 'vs_light'; Profile = 'vs_6_0'; Entry = 'vh_billboard_lights'; Defines = @() },
   @{ Name = 'ps_flare'; Profile = 'ps_6_0'; Entry = 'ph_billboard_lights'; Defines = @('-D', 'WITH_FLARE_UV') },
   @{ Name = 'ps_light'; Profile = 'ps_6_0'; Entry = 'ph_billboard_lights'; Defines = @() },
+  @{ Name = 'vs_macro'; Profile = 'vs_6_0'; Entry = 'vh_macro_lights'; Defines = @('-D', 'MACRO_LIGHTS') },
+  @{ Name = 'ps_macro'; Profile = 'ps_6_0'; Entry = 'ph_macro_lights'; Defines = @('-D', 'MACRO_LIGHTS') },
   @{ Name = 'vs_fullscreen'; Profile = 'vs_6_0'; Entry = 'vh_fullscreen'; Defines = @() },
   @{ Name = 'vs_fullscreen_tex'; Profile = 'vs_6_0'; Entry = 'vh_fullscreen_tex'; Defines = @() },
   @{ Name = 'vs_material'; Profile = 'vs_6_0'; Entry = 'vh_base'; Defines = @() },

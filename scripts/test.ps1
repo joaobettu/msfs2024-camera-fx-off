@@ -25,20 +25,22 @@ if ($Gpu -and -not $Force -and (Get-Process -Name FlightSimulator2024 -ErrorActi
 $build = Join-Path (Split-Path $PSScriptRoot) 'build'
 $pak = @(Get-ChildItem (Join-Path $GamePath 'Shaders') -Filter 'SHADERSPAK.*.SM6.PC.PAK')[0].FullName
 $twins = "$build\msfs2024-camera-fx-off.twins"
+# The sim's own dxcompiler.dll, which rebuilds the light glow shaders without star rays (only loaded, never changed).
+$dxc = Join-Path $GamePath 'Dxcompiler.DLL'
 $adapter = @()
 if ($Gpu) { $adapter = @('--adapter=gpu') }
 $failed = 0
 
 Write-Host "== classify_test"
-& "$build\tests\classify_test.exe" $pak $twins
+& "$build\tests\classify_test.exe" $pak $twins $dxc
 if ($LASTEXITCODE -ne 0) { $failed++ }
 
 foreach ($run in @(
     @('--sun-flare-off=1', '--bloom-off=1'),
-    @('--sun-flare-off=0', '--bloom-off=0'),
-    @('--sun-flare-off=1', '--bloom-off=1', '--keep-glow=0', '--keep-star=1', '--keep-ghosts=1'),
-    @('--sun-flare-off=1', '--bloom-off=1', "--real-pak=$pak", "--real-twins=$twins"))) {
-  $arguments = @($adapter) + @($run)
+    @('--sun-flare-off=0', '--bloom-off=0', '--light-star-off=0', '--light-glow-size=50'),
+    @('--sun-flare-off=1', '--bloom-off=1', '--keep-glow=0', '--keep-star=1', '--keep-ghosts=1', '--light-glow-size=100'),
+    @('--sun-flare-off=1', '--bloom-off=1', '--light-glow-size=25', "--real-pak=$pak", "--real-twins=$twins"))) {
+  $arguments = @($adapter) + @($run) + @("--dxcompiler=$dxc")
   Write-Host "== fixture $($arguments -join ' ')"
   & "$build\fixture\fixture.exe" @arguments
   if ($LASTEXITCODE -ne 0) { $failed++ }
@@ -51,7 +53,7 @@ New-Item -ItemType Directory -Force $elsewhere | Out-Null
 foreach ($file in 'fixture.exe', 'dxgi.dll', 'ReShade.ini', 'msfs2024-camera-fx-off.addon64') {
   Copy-Item -LiteralPath (Join-Path "$build\fixture" $file) -Destination $elsewhere -Force
 }
-$arguments = @($adapter) + @('--sun-flare-off=1', '--bloom-off=1', '--keep-glow=1', '--pak-next-to-exe')
+$arguments = @($adapter) + @('--sun-flare-off=1', '--bloom-off=1', '--keep-glow=1', '--light-glow-size=75', '--pak-next-to-exe', "--dxcompiler=$dxc")
 Write-Host "== fixture (in '$elsewhere') $($arguments -join ' ')"
 & (Join-Path $elsewhere 'fixture.exe') @arguments
 if ($LASTEXITCODE -ne 0) { $failed++ }

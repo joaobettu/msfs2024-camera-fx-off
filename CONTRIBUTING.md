@@ -29,7 +29,7 @@ Open an issue with the **Feature request** form. Say what bothers you in the sim
 
 ## After a sim update
 
-Sim updates can change the game's shaders, and two parts of the add-on depend on them.
+Sim updates can change the game's shaders, and three parts of the add-on depend on them.
 
 - **Bloom.** If the shader package changes, the add-on leaves bloom on and says so in the log and the overlay. To update it:
   1. Run `tools\gen_twins.ps1` to write a new `build\msfs2024-camera-fx-off.twins`. It refuses to write the file if any pair is ambiguous.
@@ -38,6 +38,9 @@ Sim updates can change the game's shaders, and two parts of the add-on depend on
   - For shaders it doesn't know, the add-on goes by draw order, and the log says so: "has shaders this version does not know", followed by the VS and PS digests.
   - Check in the sim which part each of those draws by toggling the **Keep** options.
   - Then add their digests to `known_flare_part` in `src/classify.hpp` and to the table in `tests/classify_test.cpp`.
+- **Star rays on lights.** The light shaders are recognized in `src/classify.hpp` and changed in `src/dxil_patch.hpp`, both by their code rather than by digest.
+  - If the log says "left as is" for a light shader, the reason follows: the step of the patch that no longer matches.
+  - `tests/classify_test.cpp` expects the number of light shaders in the package, and rebuilds each one with the game's `Dxcompiler.DLL`: run it after updating the patch.
 
 ## Contributing code
 

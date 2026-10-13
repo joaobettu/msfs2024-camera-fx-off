@@ -155,4 +155,25 @@ namespace dxbc
 		}
 		return false;
 	}
+
+	// DXIL resource kind (DXIL::ResourceKind: 2 = Texture2D, 4 = Texture3D, 7 = Texture2DArray...) of the resource bound at
+	// that register, from PSV0 version 1 on. Zero when unknown.
+	inline uint32_t resource_kind(const psv0 &psv, resource_type type, uint32_t space, uint32_t reg)
+	{
+		if (psv.resource_stride < 24)
+			return 0;
+		for (uint32_t i = 0; i < psv.resource_count; ++i)
+		{
+			const uint8_t *e = psv.resources + size_t(i) * psv.resource_stride;
+			uint32_t t, s, lower, upper, kind;
+			std::memcpy(&t, e, 4);
+			std::memcpy(&s, e + 4, 4);
+			std::memcpy(&lower, e + 8, 4);
+			std::memcpy(&upper, e + 12, 4);
+			std::memcpy(&kind, e + 16, 4);
+			if (t == uint32_t(type) && s == space && lower <= reg && reg <= upper)
+				return kind;
+		}
+		return 0;
+	}
 }

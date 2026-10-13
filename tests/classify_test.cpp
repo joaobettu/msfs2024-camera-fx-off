@@ -5,6 +5,7 @@
 // - the parsers never read out of bounds on corrupted bytecode (inputs end right before an inaccessible page).
 #include "../src/classify.hpp"
 #include "../src/twins.hpp"
+#include "../src/dxil_patch.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -25,6 +26,11 @@ namespace
 		printf("%s: %s\n", condition ? "ok  " : "FAIL", what);
 		if (!condition)
 			++g_failures;
+	}
+
+	void check(bool condition, const std::string &what)
+	{
+		check(condition, what.c_str());
 	}
 
 	struct container
@@ -159,7 +165,7 @@ int wmain(int argc, wchar_t **argv)
 {
 	if (argc < 2)
 	{
-		printf("usage: classify_test <SHADERSPAK.*.SM6.PC.PAK> [<.twins file>]\n");
+		printf("usage: classify_test <SHADERSPAK.*.SM6.PC.PAK> [<.twins file> [<the game's Dxcompiler.DLL>]]\n");
 		return 2;
 	}
 	const std::wstring pak_path = argv[1];
@@ -193,27 +199,76 @@ int wmain(int argc, wchar_t **argv)
 		flare_shaders.try_emplace(e.ps);
 	}
 
-	size_t tonemap = 0;
-	std::vector<container> bloom_tonemaps;
+	size_t tonemap = 0, signed_ok = 0;
+	std::vector<container> bloom_tonemaps, light_glows, light_flares;
 	for (const container &c : containers)
 	{
 		const uint8_t *code = pak.data() + c.offset;
 		tonemap += camfx::entry_point(code, c.size) == "ph_tonemapping";
-		if (camfx::classify_pixel_shader(code, c.size) == camfx::pso_kind::tonemap_bloom)
+		const camfx::pso_kind kind = camfx::classify_pixel_shader(code, c.size);
+		if (kind == camfx::pso_kind::tonemap_bloom)
 			bloom_tonemaps.push_back(c);
+		if (kind == camfx::pso_kind::light_glow)
+			light_glows.push_back(c);
+		if (kind == camfx::pso_kind::light_flare)
+			light_flares.push_back(c);
 		const auto it = flare_shaders.find(camfx::digest_prefix(code, c.size));
 		if (it != flare_shaders.end())
 			it->second.push_back(code);
+		// The hash the add-on signs rebuilt shaders with must be the one the game's compiler signed these with.
+		signed_ok += dxil::signed_correctly(code, c.size);
 	}
 	const size_t bloom = bloom_tonemaps.size();
-	printf("ph_tonemapping %zu, tonemap_bloom %zu\n", tonemap, bloom);
+	printf("ph_tonemapping %zu, tonemap_bloom %zu, light_glow %zu, light_flare %zu\n", tonemap, bloom, light_glows.size(), light_flares.size());
 	check(bloom >= 1 && bloom < tonemap, "some, not all, tonemapping permutations have bloom");
+	check(signed_ok == containers.size(), "the DXIL hash matches the digest of every container (" + std::to_string(signed_ok) + " of " + std::to_string(containers.size()) + ")");
+
+	// Every light glow and light flare pixel shader rebuilt without star rays by the game's dxcompiler.dll, at every glow
+	// size: signed, and still recognized as what it was.
+	if (argc >= 4)
+	{
+		dxil::compiler dxc;
+		std::string error;
+		if (!dxc.load(argv[3], error))
+			check(false, ("load the game's dxcompiler.dll: " + error).c_str());
+		else
+		{
+			const auto rebuild = [&](const std::vector<container> &shaders, camfx::pso_kind kind) {
+				size_t rebuilt = 0;
+				for (const container &c : shaders)
+				{
+					const uint8_t *code = pak.data() + c.offset;
+					std::vector<std::vector<uint8_t>> variants;
+					std::string what;
+					const bool ok = dxc.make_light_variants(kind == camfx::pso_kind::light_flare, code, c.size, variants, what);
+					printf("  %s %s: %s\n", std::string(camfx::entry_point(code, c.size)).c_str(), camfx::to_hex(digest_of(code, c.size)).substr(0, 8).c_str(), what.c_str());
+					size_t good = 0;
+					for (const std::vector<uint8_t> &v : variants)
+						good += !v.empty() && dxil::signed_correctly(v.data(), v.size()) && camfx::classify_pixel_shader(v.data(), v.size()) == kind;
+					rebuilt += ok && good == dxil::glow_size_count;
+				}
+				return !shaders.empty() && rebuilt == shaders.size();
+			};
+			check(rebuild(light_glows, camfx::pso_kind::light_glow), "every light glow pixel shader rebuilt without star rays at every glow size, signed and still recognized");
+			check(rebuild(light_flares, camfx::pso_kind::light_flare), "every light flare pixel shader rebuilt without its star at every glow size, signed and still recognized");
+		}
+	}
 
 	// Numbers from the analysis of this exact package (sim version of October 2026).
 	if (pak_path.find(L"SHADERSPAK.d5d2118d.SM6.PC.PAK") != std::wstring::npos)
 	{
 		check(containers.size() == 8350, "8350 containers");
 		check(tonemap == 770 && bloom == 384, "770 tonemapping permutations, 384 with bloom");
+		size_t billboard = 0, macro = 0;
+		for (const container &c : light_glows)
+		{
+			const std::string_view entry = camfx::entry_point(pak.data() + c.offset, c.size);
+			billboard += entry == "ph_billboard_lights";
+			macro += entry == "ph_macro_lights";
+		}
+		check(billboard == 3 && macro == 2 && light_glows.size() == 5, "5 light glow pixel shaders: 3 for city and airport lights, 2 for aircraft lights");
+		const auto flare = [&](size_t i) { return light_flares.size() > i ? camfx::to_hex(digest_of(pak.data() + light_flares[i].offset, light_flares[i].size)).substr(0, 8) : std::string(); };
+		check(light_flares.size() == 2 && flare(0) == "2b398c27" && flare(1) == "979163b3", "2 light flare pixel shaders, 2b398c27 and 979163b3 (of 3078 ph_base)");
 
 		size_t found = 0;
 		for (const flare_element &e : flare_elements)

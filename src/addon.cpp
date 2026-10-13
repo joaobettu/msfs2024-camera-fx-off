@@ -2,7 +2,9 @@
 // ReShade add-on that removes the "filmed with a camera" look from Microsoft Flight Simulator 2024:
 // - the lens flare, by skipping the quads the game draws for it right after upscaling; its glow, star rays and ghosts can
 //   each be kept from the overlay (none is by default);
-// - bloom and its lens dirt, by binding the game's own tonemapping permutation without bloom in place of the one with it.
+// - bloom and its lens dirt, by binding the game's own tonemapping permutation without bloom in place of the one with it;
+// - the star rays on lights (city, airport and aircraft lights), by binding their glow and flare pixel shaders rebuilt
+//   without them, with a smaller glow (50% by default).
 // It only uses ReShade events: no hooks of its own, and little per-call work (a lock-free table lookup on pipeline binds,
 // a view format lookup on render target binds without depth).
 
@@ -10,12 +12,15 @@
 #include <reshade.hpp>
 
 #include "classify.hpp"
+#include "dxil_patch.hpp"
 #include "twins.hpp"
 #include "version.h"
 
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <share.h>
@@ -30,7 +35,7 @@ using camfx::pso_kind;
 
 extern "C" __declspec(dllexport) const char *NAME = "MSFS 2024 Camera FX Off";
 extern "C" __declspec(dllexport) const char *AUTHOR = "PdPanoo";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Removes the lens flare and the bloom with lens dirt from Microsoft Flight Simulator 2024.";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Removes the lens flare, the bloom with lens dirt and the star rays on lights from Microsoft Flight Simulator 2024.";
 extern "C" __declspec(dllexport) const char *WEBSITE = "https://github.com/joaobettu/msfs2024-camera-fx-off";
 extern "C" __declspec(dllexport) const char *ISSUES = "https://github.com/joaobettu/msfs2024-camera-fx-off/issues";
 
@@ -44,10 +49,15 @@ namespace
 	std::atomic<bool> g_keep[camfx::flare_part_count] = { false, false, false };
 	const wchar_t *const g_keep_keys[camfx::flare_part_count] = { L"keep_glow", L"keep_star", L"keep_ghosts" };
 	std::atomic<bool> g_bloom_off { true };
-	// Pressed together with Ctrl+Shift
-	UINT g_key_flare = VK_F5, g_key_bloom = VK_F6, g_key_trace = VK_F7;
+	// Star rays on the glow of lights: the light glow pixel shaders are rebuilt without them.
+	std::atomic<bool> g_light_star_off { true };
+	// Size of the glow left around those lights, as an index in dxil::glow_sizes (the game's size first): 50% by default.
+	// Stored in percent.
+	std::atomic<uint32_t> g_light_glow_size { 2 };
+	// Pressed together with Ctrl+Shift. F9 to F12 are taken by the Glass Cockpit DLSS Fix add-on.
+	UINT g_key_flare = VK_F5, g_key_bloom = VK_F6, g_key_trace = VK_F7, g_key_light_star = VK_F8;
 
-	std::wstring g_ini_path, g_log_path, g_trace_path, g_twins_path, g_pak_override;
+	std::wstring g_ini_path, g_log_path, g_trace_path, g_twins_path, g_pak_override, g_dxcompiler_override;
 
 	std::string key_name(UINT vk)
 	{
@@ -79,13 +89,24 @@ namespace
 		for (size_t i = 0; i < camfx::flare_part_count; ++i)
 			g_keep[i] = get(g_keep_keys[i], 0) != 0;
 		g_bloom_off = get(L"bloom_off", 1) != 0;
+		g_light_star_off = get(L"light_star_off", 1) != 0;
+		// The offered size nearest to the one stored.
+		const int percent = get(L"light_glow_size", 50);
+		uint32_t nearest = 0;
+		for (uint32_t i = 1; i < dxil::glow_size_count; ++i)
+			if (std::abs(dxil::glow_sizes[i] - percent) < std::abs(dxil::glow_sizes[nearest] - percent))
+				nearest = i;
+		g_light_glow_size = nearest;
 		g_key_flare = UINT(get(L"key_flare", VK_F5));
 		g_key_bloom = UINT(get(L"key_bloom", VK_F6));
 		g_key_trace = UINT(get(L"key_trace", VK_F7));
+		g_key_light_star = UINT(get(L"key_light_star", VK_F8));
 
-		wchar_t pak[MAX_PATH] = L"";
-		GetPrivateProfileStringW(L"settings", L"pak_path", L"", pak, MAX_PATH, g_ini_path.c_str());
-		g_pak_override = pak;
+		wchar_t path[MAX_PATH] = L"";
+		GetPrivateProfileStringW(L"settings", L"pak_path", L"", path, MAX_PATH, g_ini_path.c_str());
+		g_pak_override = path;
+		GetPrivateProfileStringW(L"settings", L"dxcompiler_path", L"", path, MAX_PATH, g_ini_path.c_str());
+		g_dxcompiler_override = path;
 	}
 
 	void save_settings()
@@ -95,6 +116,8 @@ namespace
 		for (size_t i = 0; i < camfx::flare_part_count; ++i)
 			put(g_keep_keys[i], g_keep[i]);
 		put(L"bloom_off", g_bloom_off);
+		put(L"light_star_off", g_light_star_off);
+		WritePrivateProfileStringW(L"settings", L"light_glow_size", std::to_wstring(dxil::glow_sizes[g_light_glow_size]).c_str(), g_ini_path.c_str());
 		// Keys of earlier versions
 		for (const wchar_t *const key : { L"flare_keep", L"light_glow_off", L"light_point_off" })
 			WritePrivateProfileStringW(L"settings", key, nullptr, g_ini_path.c_str());
@@ -102,9 +125,16 @@ namespace
 
 	std::string keep_text()
 	{
-		char text[64];
+		char text[96];
 		snprintf(text, sizeof(text), "keep_glow=%d keep_star=%d keep_ghosts=%d",
 			int(g_keep[size_t(flare_part::glow)].load()), int(g_keep[size_t(flare_part::star)].load()), int(g_keep[size_t(flare_part::ghosts)].load()));
+		return text;
+	}
+
+	std::string lights_text()
+	{
+		char text[64];
+		snprintf(text, sizeof(text), "light_star_off=%d light_glow_size=%d", int(g_light_star_off.load()), dxil::glow_sizes[g_light_glow_size]);
 		return text;
 	}
 
@@ -137,7 +167,9 @@ namespace
 	struct pso_info
 	{
 		pso_kind kind = pso_kind::none;
-		// No-bloom pipeline bound in place of a tonemap_bloom one (zero if none could be made)
+		// No-bloom pipeline bound in place of a tonemap_bloom one, or the address of the light_twins of a light_glow or
+		// light_flare one
+		// (zero if none could be made)
 		uint64_t twin = 0;
 		// Material pipelines: first 4 bytes of the vertex and pixel shader digests (vs << 32 | ps), which name a lens flare element.
 		uint64_t tag = 0;
@@ -297,6 +329,34 @@ namespace
 		log("twins: %zu pairs for %S", g_twins.entries.size(), file_name(g_pak_path).c_str());
 	}
 
+	// Set while the add-on creates a pipeline of its own, so that on_init_pipeline leaves it alone if ReShade reports it.
+	thread_local bool t_creating_twin = false;
+
+	// The same pipeline description with another pixel shader, which binds a subset of the same resources, so it works with
+	// the same root signature and root arguments. Zero if the device refuses it.
+	uint64_t create_pipeline_with_ps(device *dev, pipeline_layout layout, uint32_t count, const pipeline_subobject *subobjects, const shader_desc &ps, const std::vector<uint8_t> &code)
+	{
+		struct guard
+		{
+			guard() { t_creating_twin = true; }
+			~guard() { t_creating_twin = false; }
+		} creating;
+		shader_desc twin_ps = ps;
+		twin_ps.code = code.data();
+		twin_ps.code_size = code.size();
+		std::vector<pipeline_subobject> desc(subobjects, subobjects + count);
+		for (pipeline_subobject &subobject : desc)
+		{
+			if (subobject.type == pipeline_subobject_type::pixel_shader)
+			{
+				subobject.count = 1;
+				subobject.data = &twin_ps;
+			}
+		}
+		pipeline twin = {};
+		return dev->create_pipeline(layout, count, desc.data(), &twin) ? twin.handle : 0;
+	}
+
 	uint64_t create_twin(device *dev, pipeline_layout layout, uint32_t count, const pipeline_subobject *subobjects, const shader_desc &ps)
 	{
 		std::call_once(g_twins_once, load_twins);
@@ -325,23 +385,9 @@ namespace
 			return 0;
 		}
 
-		// Same pipeline description with the pixel shader swapped for the game's permutation without bloom.
-		// That one binds a subset of the same resources, so it works with the same root signature and root arguments.
-		shader_desc twin_ps = ps;
-		twin_ps.code = code.data();
-		twin_ps.code_size = code.size();
-		std::vector<pipeline_subobject> desc(subobjects, subobjects + count);
-		for (pipeline_subobject &subobject : desc)
-		{
-			if (subobject.type == pipeline_subobject_type::pixel_shader)
-			{
-				subobject.count = 1;
-				subobject.data = &twin_ps;
-			}
-		}
-
-		pipeline twin = {};
-		if (!dev->create_pipeline(layout, count, desc.data(), &twin))
+		// The pixel shader swapped for the game's permutation without bloom.
+		const uint64_t twin = create_pipeline_with_ps(dev, layout, count, subobjects, ps, code);
+		if (twin == 0)
 		{
 			log("twins: creating the no-bloom pipeline for %s failed", camfx::to_hex(digest).c_str());
 			g_twin_failed++;
@@ -350,7 +396,107 @@ namespace
 
 		g_twin_count++;
 		log("twins: tonemapping %s uses no-bloom twin %s", camfx::to_hex(digest).c_str(), camfx::to_hex(it->second.twin).c_str());
-		return twin.handle;
+		return twin;
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Lights without star rays: the light glow and light flare pixel shaders rebuilt by the game's dxcompiler.dll (see
+	// dxil_patch.hpp), once per shader and glow size. Each of their pipelines then gets a twin with each, one of them bound
+	// in its place.
+
+	// The twins of a light glow or light flare pipeline by glow size (dxil::glow_sizes); the one at the game's size always
+	// exists.
+	struct light_twins
+	{
+		uint64_t pipelines[dxil::glow_size_count] = {};
+	};
+
+	std::mutex g_starless_mutex;
+	dxil::compiler g_dxc;
+	bool g_dxc_tried = false, g_dxc_ok = false;
+	// Rebuilt pixel shaders by the original's digest, one per glow size; empty when it could not be rebuilt (the lights
+	// then stay as they are).
+	std::unordered_map<camfx::digest16, std::vector<std::vector<uint8_t>>, camfx::digest16_hash> g_starless;
+	std::atomic<uint32_t> g_starless_count { 0 }, g_starless_failed { 0 };
+	std::atomic<bool> g_starless_unavailable { false };
+
+	// The address of a new light_twins, or zero.
+	uint64_t create_light_twins(device *dev, pipeline_layout layout, uint32_t count, const pipeline_subobject *subobjects, const shader_desc &ps, bool flare)
+	{
+		camfx::digest16 digest;
+		if (!dxbc::digest(ps.code, ps.code_size, digest.bytes))
+			return 0;
+
+		std::vector<std::vector<uint8_t>> code;
+		{
+			const std::lock_guard<std::mutex> lock(g_starless_mutex);
+			if (!g_dxc_tried)
+			{
+				// The sim ships dxcompiler.dll next to its executable.
+				g_dxc_tried = true;
+				std::wstring path = g_dxcompiler_override;
+				if (path.empty())
+				{
+					wchar_t exe[MAX_PATH] = L"";
+					GetModuleFileNameW(nullptr, exe, MAX_PATH);
+					path = exe;
+					path.erase(path.find_last_of(L"\\/") + 1);
+					path += L"Dxcompiler.DLL";
+				}
+				std::string error;
+				g_dxc_ok = g_dxc.load(path, error);
+				if (!g_dxc_ok)
+				{
+					log("lights: %s (%S); the star rays stay", error.c_str(), file_name(path).c_str());
+					g_starless_unavailable = true;
+				}
+			}
+			if (!g_dxc_ok)
+				return 0;
+
+			auto it = g_starless.find(digest);
+			if (it == g_starless.end())
+			{
+				std::vector<std::vector<uint8_t>> made;
+				std::string what;
+				const ULONGLONG start = GetTickCount64();
+				const bool ok = g_dxc.make_light_variants(flare, ps.code, ps.code_size, made, what);
+				std::string sizes;
+				for (size_t i = 0; ok && i < dxil::glow_size_count; ++i)
+					if (!made[i].empty())
+						sizes += (sizes.empty() ? "" : "/") + std::to_string(dxil::glow_sizes[i]);
+				const std::string result = ok ? "rebuilt without star rays, glow sizes " + sizes + "%" : "left as is";
+				const std::string entry(camfx::entry_point(ps.code, ps.code_size));
+				log("lights: %s %s %s in %llu ms: %s", entry.c_str(), camfx::to_hex(digest).c_str(), result.c_str(), GetTickCount64() - start, what.c_str());
+				it = g_starless.emplace(digest, ok ? std::move(made) : std::vector<std::vector<uint8_t>>()).first;
+			}
+			code = it->second;
+		}
+		if (code.empty())
+		{
+			g_starless_failed++;
+			return 0;
+		}
+
+		auto twins = std::make_unique<light_twins>();
+		for (size_t i = 0; i < dxil::glow_size_count; ++i)
+		{
+			if (code[i].empty())
+				continue;
+			twins->pipelines[i] = create_pipeline_with_ps(dev, layout, count, subobjects, ps, code[i]);
+			if (twins->pipelines[i] == 0)
+				log("lights: creating the pipeline without star rays (glow size %d%%) for %s failed", dxil::glow_sizes[i], camfx::to_hex(digest).c_str());
+		}
+		if (twins->pipelines[0] == 0)
+		{
+			for (const uint64_t pipeline : twins->pipelines)
+				if (pipeline != 0)
+					dev->destroy_pipeline({ pipeline });
+			g_starless_failed++;
+			return 0;
+		}
+		g_starless_count++;
+		return reinterpret_cast<uint64_t>(twins.release());
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -441,8 +587,8 @@ namespace
 			log("trace: cannot write %S", file_name(g_trace_path).c_str());
 			return;
 		}
-		fprintf(file, "# MSFS 2024 Camera FX Off %s frame trace: sun_flare_off=%d %s bloom_off=%d, %zu lines%s\n",
-			CAMFX_VERSION_STRING, int(g_sun_flare_off.load()), keep_text().c_str(), int(g_bloom_off.load()),
+		fprintf(file, "# MSFS 2024 Camera FX Off %s frame trace: sun_flare_off=%d %s bloom_off=%d %s, %zu lines%s\n",
+			CAMFX_VERSION_STRING, int(g_sun_flare_off.load()), keep_text().c_str(), int(g_bloom_off.load()), lights_text().c_str(),
 			lines.size(), lines.size() >= max_trace_lines ? " (truncated)" : "");
 		for (const std::string &line : lines)
 			fprintf(file, "%s\n", line.c_str());
@@ -453,11 +599,11 @@ namespace
 	// ---------------------------------------------------------------------------------------------
 	// Statistics
 
-	std::atomic<uint64_t> g_flare_skipped { 0 }, g_flare_kept { 0 }, g_bloom_swapped { 0 }, g_bloom_kept { 0 };
+	std::atomic<uint64_t> g_flare_skipped { 0 }, g_flare_kept { 0 }, g_bloom_swapped { 0 }, g_bloom_kept { 0 }, g_star_swapped { 0 };
 
 	struct rates
 	{
-		uint64_t flare_skipped, flare_kept, bloom_swapped, bloom_kept;
+		uint64_t flare_skipped, flare_kept, bloom_swapped, bloom_kept, star_swapped;
 
 		bool operator==(const rates &) const = default;
 	};
@@ -471,21 +617,22 @@ namespace
 		if (now - g_rate_tick < 1000)
 			return;
 		const double seconds = g_rate_tick != 0 ? double(now - g_rate_tick) / 1000.0 : 1.0;
-		const rates totals = { g_flare_skipped.load(), g_flare_kept.load(), g_bloom_swapped.load(), g_bloom_kept.load() };
+		const rates totals = { g_flare_skipped.load(), g_flare_kept.load(), g_bloom_swapped.load(), g_bloom_kept.load(), g_star_swapped.load() };
 		const auto per_second = [seconds](uint64_t a, uint64_t b) { return uint64_t(double(a - b) / seconds + 0.5); };
 		g_rates = {
 			per_second(totals.flare_skipped, g_totals.flare_skipped),
 			per_second(totals.flare_kept, g_totals.flare_kept),
 			per_second(totals.bloom_swapped, g_totals.bloom_swapped),
-			per_second(totals.bloom_kept, g_totals.bloom_kept) };
+			per_second(totals.bloom_kept, g_totals.bloom_kept),
+			per_second(totals.star_swapped, g_totals.star_swapped) };
 		g_totals = totals;
 		g_rate_tick = now;
 
 		// Log only when something changed, to keep the log small.
 		if (now - g_log_tick >= 10000 && !(g_rates == g_logged))
 		{
-			log("stats/s: flare quads skipped %llu, flare quads kept %llu, tonemap binds swapped %llu, tonemap with bloom drawn %llu",
-				g_rates.flare_skipped, g_rates.flare_kept, g_rates.bloom_swapped, g_rates.bloom_kept);
+			log("stats/s: flare quads skipped %llu, flare quads kept %llu, tonemap binds swapped %llu, tonemap with bloom drawn %llu, light glow binds without star rays %llu",
+				g_rates.flare_skipped, g_rates.flare_kept, g_rates.bloom_swapped, g_rates.bloom_kept, g_rates.star_swapped);
 			g_logged = g_rates;
 			g_log_tick = now;
 		}
@@ -631,8 +778,29 @@ namespace
 		g_names[handle] = std::move(name);
 	}
 
+	void destroy_twin(device *dev, const pso_info &info)
+	{
+		if (info.twin == 0)
+			return;
+		if (info.kind == pso_kind::light_glow || info.kind == pso_kind::light_flare)
+		{
+			const light_twins *const twins = reinterpret_cast<const light_twins *>(info.twin);
+			for (const uint64_t pipeline : twins->pipelines)
+				if (pipeline != 0)
+					dev->destroy_pipeline({ pipeline });
+			delete twins;
+			g_starless_count--;
+			return;
+		}
+		dev->destroy_pipeline({ info.twin });
+		if (info.kind == pso_kind::tonemap_bloom)
+			g_twin_count--;
+	}
+
 	void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const pipeline_subobject *subobjects, pipeline pipeline)
 	{
+		if (t_creating_twin)
+			return;
 		const shader_desc *const vs = find_shader(count, subobjects, pipeline_subobject_type::vertex_shader);
 		const shader_desc *const ps = find_shader(count, subobjects, pipeline_subobject_type::pixel_shader);
 		const shader_desc *const cs = find_shader(count, subobjects, pipeline_subobject_type::compute_shader);
@@ -656,11 +824,7 @@ namespace
 			if (erased)
 			{
 				g_pso_count[size_t(existing.kind)]--;
-				if (existing.twin != 0)
-				{
-					dev->destroy_pipeline({ existing.twin });
-					g_twin_count--;
-				}
+				destroy_twin(dev, existing);
 			}
 		}
 		if (kind == pso_kind::none)
@@ -670,6 +834,8 @@ namespace
 		info.kind = kind;
 		if (kind == pso_kind::tonemap_bloom)
 			info.twin = create_twin(dev, layout, count, subobjects, *ps);
+		if (kind == pso_kind::light_glow || kind == pso_kind::light_flare)
+			info.twin = create_light_twins(dev, layout, count, subobjects, *ps, kind == pso_kind::light_flare);
 		if (kind == pso_kind::material)
 			info.tag = camfx::flare_tag(digest_prefix_guarded(vs), digest_prefix_guarded(ps));
 
@@ -681,8 +847,7 @@ namespace
 		if (!inserted)
 		{
 			log("pipeline table full, ignoring %s pipeline %016llx", camfx::kind_name(kind), pipeline.handle);
-			if (info.twin != 0)
-				dev->destroy_pipeline({ info.twin });
+			destroy_twin(dev, info);
 			return;
 		}
 
@@ -703,11 +868,7 @@ namespace
 		{
 			g_pso_count[size_t(info.kind)]--;
 			// The game only destroys a pipeline once the GPU is done with it, and the twin was only used in its place.
-			if (info.twin != 0)
-			{
-				dev->destroy_pipeline({ info.twin });
-				g_twin_count--;
-			}
+			destroy_twin(dev, info);
 		}
 
 		const std::unique_lock<std::shared_mutex> lock(g_name_mutex);
@@ -751,6 +912,14 @@ namespace
 			kind = pso_kind::none;
 			swapped = true;
 		}
+		else if ((kind == pso_kind::light_glow || kind == pso_kind::light_flare) && info.twin != 0 && g_light_star_off.load(std::memory_order_relaxed))
+		{
+			const light_twins &twins = *reinterpret_cast<const light_twins *>(info.twin);
+			const uint64_t sized = twins.pipelines[g_light_glow_size.load(std::memory_order_relaxed)];
+			cmd->bind_pipeline(stages, { sized != 0 ? sized : twins.pipelines[0] });
+			g_star_swapped.fetch_add(1, std::memory_order_relaxed);
+			swapped = true;
+		}
 
 		if (cmd_state *const state = cmd->get_private_data<cmd_state>())
 		{
@@ -760,7 +929,7 @@ namespace
 		}
 
 		if (g_tracing.load(std::memory_order_relaxed))
-			trace(cmd, "bind %s%s%s", pipeline_label(pipeline.handle).c_str(), known ? (std::string(" [") + camfx::kind_name(info.kind) + "]").c_str() : "", swapped ? " -> no-bloom twin" : "");
+			trace(cmd, "bind %s%s%s", pipeline_label(pipeline.handle).c_str(), known ? (std::string(" [") + camfx::kind_name(info.kind) + "]").c_str() : "", swapped ? " -> twin" : "");
 	}
 
 	enum class draw_type
@@ -909,6 +1078,8 @@ namespace
 				toggle(g_sun_flare_off, "lens flare removal");
 			if (runtime->is_key_pressed(g_key_bloom))
 				toggle(g_bloom_off, "bloom removal");
+			if (runtime->is_key_pressed(g_key_light_star))
+				toggle(g_light_star_off, "light star ray removal");
 			if (runtime->is_key_pressed(g_key_trace))
 				g_trace_requested = true;
 		}
@@ -943,11 +1114,37 @@ namespace
 		if (ImGui::Checkbox(("Remove bloom and lens dirt (Ctrl+Shift+" + key_name(g_key_bloom) + ")").c_str(), &value))
 			toggle(g_bloom_off, "bloom removal");
 
+		value = g_light_star_off;
+		if (ImGui::Checkbox(("Remove the star rays on lights (Ctrl+Shift+" + key_name(g_key_light_star) + ")").c_str(), &value))
+			toggle(g_light_star_off, "light star ray removal");
+
+		// Size of the glow left around those lights
+		static const char *const sizes[dxil::glow_size_count] = { "100% (the game's)", "75%", "50%", "35%", "25%" };
+		static_assert(dxil::glow_sizes[0] == 100 && dxil::glow_sizes[1] == 75 && dxil::glow_sizes[2] == 50 && dxil::glow_sizes[3] == 35 && dxil::glow_sizes[4] == 25);
+		ImGui::Indent();
+		ImGui::BeginDisabled(!g_light_star_off);
+		int size = int(g_light_glow_size.load());
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
+		if (ImGui::Combo("Glow size around the lights", &size, sizes, int(dxil::glow_size_count)))
+		{
+			g_light_glow_size = uint32_t(size);
+			save_settings();
+			log("light glow size %d%%", dxil::glow_sizes[size]);
+		}
+		ImGui::EndDisabled();
+		ImGui::Unindent();
+
 		ImGui::Separator();
 		ImGui::Text("Per second: %llu lens flare quads removed, %llu kept, %llu tonemap binds swapped", g_rates.flare_skipped, g_rates.flare_kept, g_rates.bloom_swapped);
 		if (g_rates.bloom_kept != 0)
 			ImGui::Text("Per second: %llu tonemap draws still with bloom", g_rates.bloom_kept);
 		ImGui::Text("Tonemap pipelines with bloom: %u, %u with a no-bloom twin", g_pso_count[size_t(pso_kind::tonemap_bloom)].load(), g_twin_count.load());
+		ImGui::Text("Light glow pipelines: %u, light flare pipelines: %u, %u of them without star rays; per second: %llu binds without star rays",
+			g_pso_count[size_t(pso_kind::light_glow)].load(), g_pso_count[size_t(pso_kind::light_flare)].load(), g_starless_count.load(), g_rates.star_swapped);
+		if (g_starless_unavailable)
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Star rays: the game's dxcompiler.dll could not be used (see the log)");
+		else if (g_starless_failed != 0)
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Star rays: %u light pipeline(s) left as they are (see the log)", g_starless_failed.load());
 
 		if (g_twins_tried && !g_twins_ok)
 			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Bloom: the .twins file is missing or made for another sim version (see the log)");
@@ -985,8 +1182,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		GetModuleFileNameW(nullptr, exe, MAX_PATH);
 		log("MSFS 2024 Camera FX Off %s (built %s %s, ReShade API %d)", CAMFX_VERSION_STRING, __DATE__, __TIME__, RESHADE_API_VERSION);
 		log("host %S", file_name(exe).c_str());
-		log("settings: sun_flare_off=%d %s bloom_off=%d keys Ctrl+Shift+%s/%s/%s", int(g_sun_flare_off.load()), keep_text().c_str(), int(g_bloom_off.load()),
-			key_name(g_key_flare).c_str(), key_name(g_key_bloom).c_str(), key_name(g_key_trace).c_str());
+		log("settings: sun_flare_off=%d %s bloom_off=%d %s keys Ctrl+Shift+%s/%s/%s/%s", int(g_sun_flare_off.load()), keep_text().c_str(),
+			int(g_bloom_off.load()), lights_text().c_str(), key_name(g_key_flare).c_str(), key_name(g_key_bloom).c_str(), key_name(g_key_light_star).c_str(),
+			key_name(g_key_trace).c_str());
 
 		reshade::register_event<reshade::addon_event::init_pipeline>(on_init_pipeline);
 		reshade::register_event<reshade::addon_event::destroy_pipeline>(on_destroy_pipeline);
@@ -1005,15 +1203,20 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		break;
 	}
 	case DLL_PROCESS_DETACH:
+	{
 		reshade::unregister_addon(module);
-		if (g_log != nullptr)
+		// Never waits: a thread the exiting process ended may have been holding the lock.
+		const std::unique_lock<std::mutex> lock(g_log_mutex, std::try_to_lock);
+		if (lock.owns_lock() && g_log != nullptr)
 		{
-			log("unloaded");
-			const std::lock_guard<std::mutex> lock(g_log_mutex);
+			SYSTEMTIME t;
+			GetLocalTime(&t);
+			fprintf(g_log, "%02u:%02u:%02u.%03u unloaded\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
 			fclose(g_log);
 			g_log = nullptr;
 		}
 		break;
+	}
 	}
 	return TRUE;
 }
