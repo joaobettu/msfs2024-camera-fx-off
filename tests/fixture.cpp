@@ -1,15 +1,15 @@
 // End-to-end test of the add-on inside a real ReShade, on WARP (software, the default) or on the GPU.
 // Runs from a folder holding a copy of ReShade's dxgi.dll and the add-on. It writes the add-on settings and a .twins file,
 // draws stand-ins of the MSFS shaders and reads the pixels back.
-//   fixture [--adapter=gpu] --sun-flare-off=1 --bloom-off=1 [--keep-glow=1 --keep-star=0 --keep-ghosts=0]
-//           [--light-star-off=0 --light-glow-size=50] [--dxcompiler=<the game's Dxcompiler.DLL>]
+//   fixture [--adapter=gpu] --sun-flare-off=1 --bloom-off=1 [--bloom-strength=50] [--keep-glow=1 --keep-star=0 --keep-ghosts=0]
+//           [--flare-size=50] [--light-star-off=0 --light-glow-size=50] [--dxcompiler=<the game's Dxcompiler.DLL>]
 //       stand-in shader package with a no-bloom twin: checks the twin swap. Settings left out use the add-on defaults.
 //   fixture [--adapter=gpu] --pak-next-to-exe ...
 //       the stand-in shader package in a Shaders folder next to this executable and no pak_path in the settings: the
 //       add-on's default lookup, as players have it with the game
 //   fixture [--adapter=gpu] --real-pak=<SHADERSPAK.*.SM6.PC.PAK> --real-twins=<.twins> ...
 //       the game's shader package and twins file: also builds a pipeline from the game's own bloom tonemapping shader and
-//       checks the add-on creates the real no-bloom twin (pipeline only, never drawn)
+//       checks the add-on creates the real no-bloom twin and its weaker bloom ones (pipelines only, never drawn)
 
 #include "../src/classify.hpp"
 #include "../src/twins.hpp"
@@ -36,6 +36,7 @@
 #include "ps_tonemap_bloom.h"
 #include "ps_tonemap_plain.h"
 #include "vs_flare.h"
+#include "vs_flare_quad.h"
 #include "vs_fullscreen.h"
 #include "vs_fullscreen_tex.h"
 #include "vs_light.h"
@@ -147,12 +148,13 @@ namespace
 
 	// From the game's shader package: the first tonemapping permutation with bloom, the light glow pixel shaders and the
 	// light glow vertex shaders (vh_billboard_lights with FlareUV, vh_macro_lights with UV) to link them with, the light
-	// flare pixel shaders and vh_base vertex shaders with the outputs they read.
+	// flare pixel shaders and vh_base vertex shaders with the outputs they read, and the lens flare quad vertex shaders
+	// with the pixel shaders of the known lens flare elements.
 	struct real_shaders
 	{
 		std::vector<uint8_t> pak;
 		const uint8_t *tonemap_ps = nullptr;
-		std::vector<const uint8_t *> glow_ps, glow_vs, flare_ps, flare_vs;
+		std::vector<const uint8_t *> glow_ps, glow_vs, flare_ps, flare_vs, quad_vs, quad_ps;
 	};
 
 	bool load_real_shaders(const std::wstring &path, real_shaders &out)
@@ -200,16 +202,23 @@ namespace
 			if (entry == "vh_base" && dxbc::contains_string(outputs, "TEXSPACE_POS") && dxbc::contains_string(outputs, "PREVIOUS_POSITION") &&
 				dxbc::contains_string(outputs, "COLOR_ALPHA"))
 				out.flare_vs.push_back(&pak[i]);
+			if (camfx::is_flare_quad_vs(&pak[i], container))
+				out.quad_vs.push_back(&pak[i]);
+			camfx::flare_part part;
+			const uint32_t prefix = camfx::digest_prefix(&pak[i], container);
+			if (entry == "ph_base" && (camfx::known_flare_part(camfx::flare_tag(0xaafcc02e, prefix), part) || camfx::known_flare_part(camfx::flare_tag(0x9bee5ecc, prefix), part)))
+				out.quad_ps.push_back(&pak[i]);
 			i += container - 1;
 		}
-		return out.tonemap_ps != nullptr && !out.glow_ps.empty() && !out.glow_vs.empty() && !out.flare_ps.empty() && !out.flare_vs.empty();
+		return out.tonemap_ps != nullptr && !out.glow_ps.empty() && !out.glow_vs.empty() && !out.flare_ps.empty() && !out.flare_vs.empty() &&
+			!out.quad_vs.empty() && !out.quad_ps.empty();
 	}
 }
 
 int wmain(int argc, wchar_t **argv)
 {
 	// Keep settings at -1 are left out of the .ini, so the add-on uses its defaults.
-	int sun_flare_off = 1, bloom_off = 1, keep_glow = -1, keep_star = -1, keep_ghosts = -1, light_star_off = -1, light_glow_size = -1;
+	int sun_flare_off = 1, bloom_off = 1, bloom_strength = -1, keep_glow = -1, keep_star = -1, keep_ghosts = -1, flare_size = -1, light_star_off = -1, light_glow_size = -1;
 	bool gpu = false, pak_next_to_exe = false;
 	std::wstring real_pak, real_twins, dxcompiler;
 	for (int i = 1; i < argc; ++i)
@@ -217,9 +226,11 @@ int wmain(int argc, wchar_t **argv)
 		const std::wstring arg = argv[i];
 		swscanf_s(argv[i], L"--sun-flare-off=%d", &sun_flare_off);
 		swscanf_s(argv[i], L"--bloom-off=%d", &bloom_off);
+		swscanf_s(argv[i], L"--bloom-strength=%d", &bloom_strength);
 		swscanf_s(argv[i], L"--keep-glow=%d", &keep_glow);
 		swscanf_s(argv[i], L"--keep-star=%d", &keep_star);
 		swscanf_s(argv[i], L"--keep-ghosts=%d", &keep_ghosts);
+		swscanf_s(argv[i], L"--flare-size=%d", &flare_size);
 		swscanf_s(argv[i], L"--light-star-off=%d", &light_star_off);
 		swscanf_s(argv[i], L"--light-glow-size=%d", &light_glow_size);
 		if (arg.rfind(L"--dxcompiler=", 0) == 0)
@@ -234,14 +245,20 @@ int wmain(int argc, wchar_t **argv)
 			real_twins = arg.substr(13);
 	}
 	const bool real = !real_pak.empty();
-	// What the add-on should use: no part of the lens flare is kept by default.
-	const bool glow_kept = keep_glow > 0, star_kept = keep_star > 0, ghosts_kept = keep_ghosts > 0;
+	// What the add-on should use: only the glow of the lens flare is kept by default.
+	const bool glow_kept = keep_glow != 0, star_kept = keep_star > 0, ghosts_kept = keep_ghosts > 0;
+	// Kept parts at 50% of the game's size by default (one of the offered sizes is expected here).
+	const int quad_size = flare_size >= 0 ? flare_size : 50;
 	// Star rays on lights: removed by default, with the glow at 50% (one of the offered sizes is expected here).
 	const bool stars_removed = light_star_off != 0;
 	const int glow_size = light_glow_size >= 0 ? light_glow_size : 50;
-	printf("fixture: %s, sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d%s bloom_off=%d light_star_off=%d light_glow_size=%d%s%s\n",
+	// Bloom: none by default (one of the offered strengths is expected here); the game's with bloom_off=0, as Ctrl+Shift+F6
+	// switches to.
+	const int strength_set = bloom_strength >= 0 ? bloom_strength : 0;
+	const int strength = bloom_off ? strength_set : 100;
+	printf("fixture: %s, sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d%s bloom_off=%d bloom_strength=%d light_star_off=%d light_glow_size=%d%s%s\n",
 		gpu ? "GPU" : "WARP", sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept),
-		keep_glow < 0 && keep_star < 0 && keep_ghosts < 0 ? " (defaults)" : "", bloom_off, int(stars_removed), glow_size, real ? ", game shaders" : "",
+		keep_glow < 0 && keep_star < 0 && keep_ghosts < 0 ? " (defaults)" : "", bloom_off, strength_set, int(stars_removed), glow_size, real ? ", game shaders" : "",
 		pak_next_to_exe ? ", shader package in Shaders next to the executable" : "");
 
 	// Add-on inputs, written before ReShade loads it.
@@ -284,6 +301,10 @@ int wmain(int argc, wchar_t **argv)
 		ini += "keep_star=" + std::to_string(keep_star) + "\r\n";
 	if (keep_ghosts >= 0)
 		ini += "keep_ghosts=" + std::to_string(keep_ghosts) + "\r\n";
+	if (flare_size >= 0)
+		ini += "flare_size=" + std::to_string(flare_size) + "\r\n";
+	if (bloom_strength >= 0)
+		ini += "bloom_strength=" + std::to_string(bloom_strength) + "\r\n";
 	if (light_star_off >= 0)
 		ini += "light_star_off=" + std::to_string(light_star_off) + "\r\n";
 	if (light_glow_size >= 0)
@@ -323,7 +344,8 @@ int wmain(int argc, wchar_t **argv)
 	sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
 	sampler.MaxLOD = D3D12_FLOAT32_MAX;
 	sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-	const D3D12_ROOT_SIGNATURE_DESC root_desc = { 1, &parameter, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE };
+	// The lens flare quads read vertex attributes, which needs the input assembler.
+	const D3D12_ROOT_SIGNATURE_DESC root_desc = { 1, &parameter, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT };
 	ComPtr<ID3DBlob> root_blob, root_error;
 	require(D3D12SerializeRootSignature(&root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &root_blob, &root_error), "D3D12SerializeRootSignature");
 	ComPtr<ID3D12RootSignature> root;
@@ -339,8 +361,20 @@ int wmain(int argc, wchar_t **argv)
 	const D3D12_DEPTH_STENCILOP_DESC keep = { D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS };
 	const D3D12_DEPTH_STENCIL_DESC no_depth = { FALSE, D3D12_DEPTH_WRITE_MASK_ZERO, D3D12_COMPARISON_FUNC_ALWAYS, FALSE, 0xFF, 0xFF, keep, keep };
 
+	// The vertex attributes of the lens flare quads, like the game's: POSITION, TEXCOORD0 and TEXCOORD1, the corner.
+	const D3D12_INPUT_ELEMENT_DESC quad_attributes[] = {
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, D3D12_APPEND_ALIGNED_ELEMENT, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 } };
+	struct quad_vertex
+	{
+		float position[4], uv[2], corner[3];
+	};
+
 	const auto make_pso = [&](ID3D12RootSignature *signature, const unsigned char *vs, const unsigned char *ps, DXGI_FORMAT format, DXGI_FORMAT depth_format, const char *what) {
 		D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+		if (vs == g_vs_flare_quad)
+			desc.InputLayout = { quad_attributes, UINT(std::size(quad_attributes)) };
 		desc.pRootSignature = signature;
 		desc.VS = { vs, container_size(vs) };
 		desc.PS = { ps, container_size(ps) };
@@ -362,11 +396,13 @@ int wmain(int argc, wchar_t **argv)
 	const ComPtr<ID3D12PipelineState> pso_macro = make_pso(root.Get(), g_vs_macro, g_ps_macro, ldr, none, "create stand-in aircraft light glow pipeline");
 	const ComPtr<ID3D12PipelineState> pso_point = make_pso(root.Get(), g_vs_light, g_ps_light, ldr, none, "create stand-in light point pipeline");
 	const ComPtr<ID3D12PipelineState> pso_tonemap = make_pso(root.Get(), g_vs_fullscreen, g_ps_tonemap_bloom, ldr, none, "create stand-in tonemapping pipeline");
-	// Lens flare stand-ins: three elements with shaders the add-on does not know (A, B, C).
-	const ComPtr<ID3D12PipelineState> pso_material = make_pso(root.Get(), g_vs_material, g_ps_material, hdr, none, "create stand-in material pipeline A");
-	const ComPtr<ID3D12PipelineState> pso_material_b = make_pso(root.Get(), g_vs_material, g_ps_material_b, hdr, none, "create stand-in material pipeline B");
-	const ComPtr<ID3D12PipelineState> pso_material_c = make_pso(root.Get(), g_vs_material, g_ps_material_c, hdr, none, "create stand-in material pipeline C");
+	// Lens flare stand-ins: three elements with shaders the add-on does not know (A, B, C), drawn with the quad vertex shader.
+	const ComPtr<ID3D12PipelineState> pso_material = make_pso(root.Get(), g_vs_flare_quad, g_ps_material, hdr, none, "create stand-in material pipeline A");
+	const ComPtr<ID3D12PipelineState> pso_material_b = make_pso(root.Get(), g_vs_flare_quad, g_ps_material_b, hdr, none, "create stand-in material pipeline B");
+	const ComPtr<ID3D12PipelineState> pso_material_c = make_pso(root.Get(), g_vs_flare_quad, g_ps_material_c, hdr, none, "create stand-in material pipeline C");
+	// Transparent geometry, drawn with the other material shaders.
 	const ComPtr<ID3D12PipelineState> pso_material_depth = make_pso(root.Get(), g_vs_material, g_ps_material, hdr, depth, "create stand-in material pipeline with depth");
+	const ComPtr<ID3D12PipelineState> pso_material_triangle = make_pso(root.Get(), g_vs_material, g_ps_material, hdr, none, "create stand-in material pipeline for a triangle");
 
 	// A second light glow pipeline built from a pipeline state stream.
 	struct
@@ -397,6 +433,7 @@ int wmain(int argc, wchar_t **argv)
 	ComPtr<ID3D12RootSignature> game_root;
 	ComPtr<ID3D12PipelineState> pso_game_tonemap;
 	std::vector<ComPtr<ID3D12PipelineState>> pso_game_glow;
+	std::vector<const uint8_t *> game_quad_vs;
 	if (real)
 	{
 		const D3D12_DESCRIPTOR_RANGE resources[2] = {
@@ -459,6 +496,44 @@ int wmain(int argc, wchar_t **argv)
 			}
 			check(linked, "a game vertex shader links with " + std::string(camfx::entry_point(ps, container_size(ps))) + " " + digest_hex(ps).substr(0, 8));
 		}
+
+		// The game's lens flare quad vertex shaders, each with the pixel shader of a lens flare element it links with: creating
+		// them makes the add-on rebuild the vertex shaders with smaller quads (they are never drawn). Some of the sprite
+		// permutations write other outputs than the lens flare pixel shaders read, so they cannot be linked here.
+		for (const uint8_t *vs : game.quad_vs)
+		{
+			bool linked = false;
+			for (const uint8_t *ps : game.quad_ps)
+			{
+				D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+				desc.InputLayout = { quad_attributes, UINT(std::size(quad_attributes)) };
+				desc.pRootSignature = game_root.Get();
+				desc.VS = { vs, container_size(vs) };
+				desc.PS = { ps, container_size(ps) };
+				desc.BlendState = blend;
+				desc.SampleMask = UINT_MAX;
+				desc.RasterizerState = raster;
+				desc.DepthStencilState = no_depth;
+				desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+				desc.NumRenderTargets = 1;
+				desc.RTVFormats[0] = hdr;
+				desc.SampleDesc = { 1, 0 };
+				ComPtr<ID3D12PipelineState> pso;
+				if (SUCCEEDED(device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso))))
+				{
+					pso_game_glow.push_back(pso);
+					linked = true;
+					break;
+				}
+			}
+			if (linked)
+				game_quad_vs.push_back(vs);
+		}
+		std::string digests;
+		for (const uint8_t *vs : game_quad_vs)
+			digests += " " + digest_hex(vs).substr(0, 8);
+		check(game_quad_vs.size() >= 2, "lens flare pixel shaders link with " + std::to_string(game_quad_vs.size()) + " of the " + std::to_string(game.quad_vs.size()) +
+			" quad vertex shaders:" + digests);
 	}
 
 	// Targets (4x4): light glow, light glow through ExecuteIndirect, aircraft light glow, light point, tonemap (LDR), then
@@ -542,6 +617,23 @@ int wmain(int argc, wchar_t **argv)
 		std::memcpy(data, &draw, sizeof(draw));
 		arguments->Unmap(0, nullptr);
 	}
+	// The vertices of the lens flare quads: a strip on the corners of the viewport, which the vertex shader scales by 0.9.
+	const quad_vertex quad[4] = {
+		{ { 0, 0, 0, 1 }, { 0, 1 }, { -1, -1, 0 } },
+		{ { 0, 0, 0, 1 }, { 0, 0 }, { -1, 1, 0 } },
+		{ { 0, 0, 0, 1 }, { 1, 1 }, { 1, -1, 0 } },
+		{ { 0, 0, 0, 1 }, { 1, 0 }, { 1, 1, 0 } } };
+	buffer_desc.Width = sizeof(quad);
+	ComPtr<ID3D12Resource> quad_buffer;
+	require(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&quad_buffer)), "create quad vertices");
+	{
+		void *data = nullptr;
+		require(quad_buffer->Map(0, nullptr, &data), "map quad vertices");
+		std::memcpy(data, quad, sizeof(quad));
+		quad_buffer->Unmap(0, nullptr);
+	}
+	const D3D12_VERTEX_BUFFER_VIEW quad_view = { quad_buffer->GetGPUVirtualAddress(), UINT(sizeof(quad)), UINT(sizeof(quad_vertex)) };
+
 	D3D12_INDIRECT_ARGUMENT_DESC argument = {};
 	argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
 	const D3D12_COMMAND_SIGNATURE_DESC signature_desc = { sizeof(D3D12_DRAW_ARGUMENTS), 1, &argument, 0 };
@@ -603,6 +695,7 @@ int wmain(int argc, wchar_t **argv)
 
 	// The lens flare, as the game draws it: the target bound once, then the glow, the star rays and the ghosts.
 	list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	list->IASetVertexBuffers(0, 1, &quad_view);
 	const auto quad_in_column = [&](UINT column) {
 		const D3D12_VIEWPORT one_column = { float(column), 0, 1, float(size), 0, 1 };
 		list->RSSetViewports(1, &one_column);
@@ -619,7 +712,7 @@ int wmain(int argc, wchar_t **argv)
 
 	draw_into(flare_depth_target, true, pso_material_depth.Get());
 	list->DrawInstanced(4, 1, 0, 0);
-	draw_into(flare_triangle_target, false, pso_material.Get());
+	draw_into(flare_triangle_target, false, pso_material_triangle.Get());
 	list->DrawInstanced(3, 1, 0, 0);
 
 	for (UINT i = 0; i < targets; ++i)
@@ -645,11 +738,11 @@ int wmain(int argc, wchar_t **argv)
 	CloseHandle(done);
 	check(device->GetDeviceRemovedReason() == S_OK, "device not removed");
 
-	// Pixels as 4 bytes (RGBA8, or the packed R11G11B10 bits): (x, 1) of a target.
+	// Pixels as 4 bytes (RGBA8, or the packed R11G11B10 bits): (x, y) of a target, (1, 1) by default.
 	void *mapped = nullptr;
 	require(readback->Map(0, nullptr, &mapped), "map readback");
 	const auto *const pixels = static_cast<const unsigned char *>(mapped);
-	const auto pixel = [&](UINT i, UINT x = 1) { const unsigned char *p = pixels + i * size * row_pitch + row_pitch + x * 4; return std::vector<int> { p[0], p[1], p[2], p[3] }; };
+	const auto pixel = [&](UINT i, UINT x = 1, UINT y = 1) { const unsigned char *p = pixels + i * size * row_pitch + y * row_pitch + x * 4; return std::vector<int> { p[0], p[1], p[2], p[3] }; };
 	const auto show = [](const std::vector<int> &p) { char text[48]; snprintf(text, sizeof(text), "(%d, %d, %d, %d)", p[0], p[1], p[2], p[3]); return std::string(text); };
 
 	const std::vector<int> glow = pixel(glow_target), glow_indirect = pixel(glow_indirect_target), macro = pixel(macro_target), point = pixel(point_target), tonemap = pixel(tonemap_target);
@@ -675,22 +768,43 @@ int wmain(int argc, wchar_t **argv)
 	check(glow_is(glow_indirect, 0.447487), "light glow" + drawn_as + " through ExecuteIndirect (stream pipeline)");
 	check(glow_is(macro, 0.233333), "aircraft light glow" + drawn_as);
 	check(point == green, "light point draw kept");
-	const auto drawn = [&](bool kept) { return std::string(!sun_flare_off ? "drawn (lens flare removal off)" : kept ? "kept" : "removed"); };
-	check((flare_glow != nothing) == (!sun_flare_off || glow_kept), "lens flare glow (first quad) " + drawn(glow_kept));
-	check((flare_star != nothing) == (!sun_flare_off || star_kept), "lens flare star rays (second quad) " + drawn(star_kept));
-	check((flare_ghost_1 != nothing) == (!sun_flare_off || ghosts_kept) && (flare_ghost_2 != nothing) == (!sun_flare_off || ghosts_kept), "lens flare ghosts (third and fourth quads) " + drawn(ghosts_kept));
+	// Each lens flare quad covers 90% of its column around the center, which is 0.75 from row 0 and 0.25 from row 1 (in
+	// viewport units), times the size of the kept parts once they are shrunk.
+	const auto flare_is = [&](UINT column, bool kept) {
+		const bool drawn = !sun_flare_off || kept;
+		const double half = 0.9 * (sun_flare_off && kept && !dxcompiler.empty() ? quad_size / 100.0 : 1.0);
+		return (pixel(flare_target, column, 0) != nothing) == (drawn && half > 0.75) && (pixel(flare_target, column, 1) != nothing) == (drawn && half > 0.25);
+	};
+	const auto drawn = [&](bool kept) {
+		return std::string(!sun_flare_off ? "drawn (lens flare removal off)" : !kept ? "removed" : quad_size != 100 ? "kept at " + std::to_string(quad_size) + "% of its size" : "kept");
+	};
+	check(flare_is(0, glow_kept), "lens flare glow (first quad) " + drawn(glow_kept));
+	check(flare_is(1, star_kept), "lens flare star rays (second quad) " + drawn(star_kept));
+	check(flare_is(2, ghosts_kept) && flare_is(3, ghosts_kept), "lens flare ghosts (third and fourth quads) " + drawn(ghosts_kept));
 	check(flare_depth != nothing, "material quad with depth bound kept");
 	check(flare_triangle != nothing, "material 3-vertex draw kept");
-	const bool twin_ran = tonemap == std::vector<int> { 0, 0, 255, 255 };
-	const bool bloom_ran = tonemap[0] == 255 && tonemap[1] == 0 && (tonemap[2] == 127 || tonemap[2] == 128) && tonemap[3] == 255;
+	// The tonemapping stand-in (see fixture_shaders.hlsl) gives (0, 0, 1) plus (4 d^2, 0, -2 d^2) times the bloom strength,
+	// d being the gray of the lens dirt (so about (1, 0, -0.5)). The dirt is cleared to 0.5, which WARP stores as 128 / 255
+	// and graphics cards may store as 127 / 255.
+	const auto tonemap_is = [&](int percent) {
+		const double k = percent / 100.0;
+		const auto byte = [](double v) { return int(std::clamp(v, 0.0, 1.0) * 255.0 + 0.5); };
+		for (const double d : { 127.0 / 255.0, 128.0 / 255.0 })
+			if (std::abs(tonemap[0] - byte(4 * d * d * k)) <= 1 && tonemap[1] == 0 && std::abs(tonemap[2] - byte(1 - 2 * d * d * k)) <= 1 && tonemap[3] == 255)
+				return true;
+		return false;
+	};
 	readback->Unmap(0, nullptr);
 
 	const std::string log = read_text(dir + L"msfs2024-camera-fx-off.log");
 	if (real)
 	{
-		// The stand-in tonemapping permutation is not in the game's twins file: the add-on must leave it alone.
-		check(bloom_ran, "tonemapping permutation without a twin keeps rendering as is");
-		check(log.find("no pair for tonemapping variant " + digest_hex(g_ps_tonemap_bloom)) != std::string::npos, "add-on reported the permutation without a twin");
+		// The stand-in tonemapping permutation is not in the game's twins file: the add-on removes its bloom with the
+		// shader it rebuilt instead.
+		check(tonemap_is(0), "tonemapping permutation without a twin drawn without bloom, by the rebuilt shader");
+		check(log.find("no pair for tonemapping variant " + digest_hex(g_ps_tonemap_bloom)) != std::string::npos &&
+			log.find("bloom: tonemapping " + digest_hex(g_ps_tonemap_bloom) + " has no twin in the shader package; the rebuilt shader removes its bloom") != std::string::npos,
+			"add-on reported the permutation without a twin, and removed its bloom with the rebuilt shader");
 
 		camfx::digest16 bloom_digest;
 		dxbc::digest(game.tonemap_ps, 32, bloom_digest.bytes);
@@ -700,44 +814,65 @@ int wmain(int argc, wchar_t **argv)
 			check(log.find("tonemapping " + digest_hex(game.tonemap_ps) + " uses no-bloom twin " + camfx::to_hex(pair->second.twin)) != std::string::npos,
 				"add-on created the game's no-bloom twin from the shader package");
 
-		// Every game light glow and light flare pixel shader rebuilt without star rays at every glow size, and a pipeline
-		// made with each.
-		const auto rebuilt_all = [&](const std::vector<const uint8_t *> &shaders) {
+		// Every game light glow and light flare pixel shader rebuilt without star rays at every glow size, every lens flare
+		// quad vertex shader rebuilt with smaller quads at every size below 100%, and a pipeline made with each.
+		const auto rebuilt_all = [&](const std::vector<const uint8_t *> &shaders, const char *prefix, const char *result) {
 			size_t count = 0;
-			for (const uint8_t *ps : shaders)
-				count += log.find("lights: " + std::string(camfx::entry_point(ps, container_size(ps))) + " " + digest_hex(ps) +
-					" rebuilt without star rays, glow sizes 100/75/50/35/25%") != std::string::npos;
+			for (const uint8_t *shader : shaders)
+				count += log.find(prefix + std::string(camfx::entry_point(shader, container_size(shader))) + " " + digest_hex(shader) + " " + result) != std::string::npos;
 			return std::to_string(count) + " of " + std::to_string(shaders.size()) + (count == shaders.size() ? "" : " (FAIL)");
 		};
-		const std::string glows = rebuilt_all(game.glow_ps), flares = rebuilt_all(game.flare_ps);
-		check(glows.find("FAIL") == std::string::npos && flares.find("FAIL") == std::string::npos,
-			"add-on rebuilt the game's light glow (" + glows + ") and light flare (" + flares + ") pixel shaders without star rays, at every glow size");
-		check(log.find("creating the pipeline without star rays") == std::string::npos, "and the device accepted every one of them");
+		const std::string glows = rebuilt_all(game.glow_ps, "lights: ", "rebuilt without star rays, glow sizes 100/75/50/25%");
+		const std::string flares = rebuilt_all(game.flare_ps, "lights: ", "rebuilt without star rays, glow sizes 100/75/50/25%");
+		const std::string quads = rebuilt_all(game_quad_vs, "lens flare: ", "rebuilt with smaller quads, sizes 75/50/25%");
+		const std::string tonemaps = rebuilt_all({ game.tonemap_ps }, "bloom: ", "rebuilt with weaker bloom, strengths 75/50/25/0%");
+		check(glows.find("FAIL") == std::string::npos && flares.find("FAIL") == std::string::npos && quads.find("FAIL") == std::string::npos && tonemaps.find("FAIL") == std::string::npos,
+			"add-on rebuilt the game's light glow (" + glows + ") and light flare (" + flares + ") pixel shaders without star rays, at every glow size, its lens flare quad vertex shaders (" +
+			quads + ") with smaller quads, and its bloom tonemapping (" + tonemaps + ") with weaker bloom");
+		check(log.find("creating the pipeline without star rays") == std::string::npos && log.find("creating the pipeline with smaller quads") == std::string::npos &&
+			log.find("creating the pipeline with weaker bloom") == std::string::npos,
+			"and the device accepted every one of them");
 	}
 	else
 	{
-		check(bloom_off ? twin_ran : bloom_ran, bloom_off ? "tonemapping ran the no-bloom twin read from the package" : "tonemapping kept the bloom permutation");
+		const bool rebuilt_bloom = !dxcompiler.empty();
+		// Without the game's dxcompiler.dll, only no bloom (the package's twin) or the game's bloom are possible.
+		const int drawn_at = strength == 0 || rebuilt_bloom ? strength : 100;
+		check(tonemap_is(drawn_at), drawn_at == 0 ? "tonemapping ran the no-bloom twin read from the package" : drawn_at == 100 ? "tonemapping kept the bloom permutation" :
+			"tonemapping ran the stand-in rebuilt with the bloom at " + std::to_string(drawn_at) + "%");
 		check(log.find("uses no-bloom twin") != std::string::npos, "add-on paired the bloom permutation with its twin");
+		if (rebuilt_bloom)
+		{
+			check(log.find("bloom: ph_tonemapping " + digest_hex(g_ps_tonemap_bloom) + " rebuilt with weaker bloom, strengths 75/50/25/0%") != std::string::npos,
+				"add-on logged the tonemapping shader it rebuilt, at every bloom strength");
+			check(log.find("creating the pipeline with weaker bloom") == std::string::npos, "and the device accepted every one of them");
+		}
 	}
 
 	if (rebuilt)
 	{
-		check(log.find("lights: ph_billboard_lights " + digest_hex(g_ps_flare) + " rebuilt without star rays, glow sizes 100/75/50/35/25%") != std::string::npos &&
-			log.find("lights: ph_macro_lights " + digest_hex(g_ps_macro) + " rebuilt without star rays, glow sizes 100/75/50/35/25%") != std::string::npos,
+		check(log.find("lights: ph_billboard_lights " + digest_hex(g_ps_flare) + " rebuilt without star rays, glow sizes 100/75/50/25%") != std::string::npos &&
+			log.find("lights: ph_macro_lights " + digest_hex(g_ps_macro) + " rebuilt without star rays, glow sizes 100/75/50/25%") != std::string::npos,
 			"add-on logged the light glow shaders it rebuilt, at every glow size");
 		check(log.find("creating the pipeline without star rays") == std::string::npos, "and the device accepted every one of them");
+	}
+	if (!dxcompiler.empty())
+	{
+		check(log.find("lens flare: vh_base " + digest_hex(g_vs_flare_quad) + " rebuilt with smaller quads, sizes 75/50/25%") != std::string::npos,
+			"add-on logged the lens flare quad vertex shader it rebuilt with smaller quads");
+		check(log.find("creating the pipeline with smaller quads") == std::string::npos, "and the device accepted every one of them");
 	}
 
 	// People attach the log to public bug reports: it names files only, never the folders they are in.
 	check(log.find(":\\") == std::string::npos && log.find(":/") == std::string::npos, "the log names no folders");
 
-	char settings[160];
-	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d bloom_off=%d light_star_off=%d light_glow_size=%d keys Ctrl+Shift+F5/F6/F7\r\n",
-		sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept), bloom_off, int(stars_removed), glow_size);
-	check(log.find(settings) != std::string::npos, "add-on read the settings (no lens flare part kept unless set otherwise; shortcuts F5, F6 and F7)");
+	char settings[224];
+	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d flare_size=%d bloom_off=%d bloom_strength=%d light_star_off=%d light_glow_size=%d keys Ctrl+Shift+F5/F6/F7\r\n",
+		sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept), quad_size, bloom_off, strength_set, int(stars_removed), glow_size);
+	check(log.find(settings) != std::string::npos, "add-on read the settings (only the lens flare glow kept, at 50%, and no bloom, unless set otherwise; shortcuts F5, F6 and F7)");
 	// The stand-in elements are not in the add-on's table of known shaders, so it goes by draw order.
 	const auto element = [&](const unsigned char *ps, const char *part) {
-		const std::string line = log_line(log, "VS:vh_base#" + digest_hex(g_vs_material).substr(0, 8) + " PS:ph_base#" + digest_hex(ps).substr(0, 8) + " has shaders this version does not know");
+		const std::string line = log_line(log, "VS:vh_base#" + digest_hex(g_vs_flare_quad).substr(0, 8) + " PS:ph_base#" + digest_hex(ps).substr(0, 8) + " has shaders this version does not know");
 		return !line.empty() && line.find(std::string("so it is taken as the ") + part) != std::string::npos;
 	};
 	check(element(g_ps_material, "glow") && element(g_ps_material_b, "star rays") && element(g_ps_material_c, "ghosts"),

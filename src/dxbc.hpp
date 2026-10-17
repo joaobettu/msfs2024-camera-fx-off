@@ -74,6 +74,28 @@ namespace dxbc
 		return false;
 	}
 
+	// Semantic name and index of element 'i' of a signature part (ISG1, OSG1). Layout: u32 element count, u32 offset of
+	// the elements, then 32-byte elements whose second u32 is the offset of the name (from the part start) and third the
+	// semantic index.
+	inline bool signature_element(span part, uint32_t i, std::string_view &name, uint32_t &semantic_index)
+	{
+		uint32_t count = 0, elements = 0, name_offset = 0;
+		if (!read_u32(part, 0, count) || !read_u32(part, 4, elements) || i >= count)
+			return false;
+		const size_t element = size_t(elements) + size_t(i) * 32;
+		if (!read_u32(part, element + 4, name_offset) || !read_u32(part, element + 8, semantic_index) || name_offset >= part.size)
+			return false;
+		const char *const text = reinterpret_cast<const char *>(part.data + name_offset);
+		const size_t room = part.size - name_offset;
+		size_t length = 0;
+		while (length < room && text[length] != '\0')
+			++length;
+		if (length == room)
+			return false;
+		name = std::string_view(text, length);
+		return true;
+	}
+
 	// PSVResourceType from DxilPipelineStateValidation.h
 	enum class resource_type : uint32_t
 	{

@@ -37,8 +37,8 @@ if ($LASTEXITCODE -ne 0) { $failed++ }
 
 foreach ($run in @(
     @('--sun-flare-off=1', '--bloom-off=1'),
-    @('--sun-flare-off=0', '--bloom-off=0', '--light-star-off=0', '--light-glow-size=50'),
-    @('--sun-flare-off=1', '--bloom-off=1', '--keep-glow=0', '--keep-star=1', '--keep-ghosts=1', '--light-glow-size=100'),
+    @('--sun-flare-off=0', '--bloom-off=0', '--bloom-strength=25', '--light-star-off=0', '--light-glow-size=50'),
+    @('--sun-flare-off=1', '--bloom-off=1', '--bloom-strength=50', '--keep-glow=0', '--keep-star=1', '--keep-ghosts=1', '--flare-size=50', '--light-glow-size=100'),
     @('--sun-flare-off=1', '--bloom-off=1', '--light-glow-size=25', "--real-pak=$pak", "--real-twins=$twins"))) {
   $arguments = @($adapter) + @($run) + @("--dxcompiler=$dxc")
   Write-Host "== fixture $($arguments -join ' ')"
@@ -53,7 +53,7 @@ New-Item -ItemType Directory -Force $elsewhere | Out-Null
 foreach ($file in 'fixture.exe', 'dxgi.dll', 'ReShade.ini', 'msfs2024-camera-fx-off.addon64') {
   Copy-Item -LiteralPath (Join-Path "$build\fixture" $file) -Destination $elsewhere -Force
 }
-$arguments = @($adapter) + @('--sun-flare-off=1', '--bloom-off=1', '--keep-glow=1', '--light-glow-size=75', '--pak-next-to-exe', "--dxcompiler=$dxc")
+$arguments = @($adapter) + @('--sun-flare-off=1', '--bloom-off=1', '--bloom-strength=75', '--keep-glow=1', '--flare-size=75', '--light-glow-size=75', '--pak-next-to-exe', "--dxcompiler=$dxc")
 Write-Host "== fixture (in '$elsewhere') $($arguments -join ' ')"
 & (Join-Path $elsewhere 'fixture.exe') @arguments
 if ($LASTEXITCODE -ne 0) { $failed++ }

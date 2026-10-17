@@ -31,9 +31,10 @@ Open an issue with the **Feature request** form. Say what bothers you in the sim
 
 Sim updates can change the game's shaders, and three parts of the add-on depend on them.
 
-- **Bloom.** If the shader package changes, the add-on leaves bloom on and says so in the log and the overlay. To update it:
+- **Bloom.** If the shader package changes, the add-on says so in the log and the overlay, and removes the bloom with the tonemapping shaders it rebuilds instead of the package's twins. To update it:
   1. Run `tools\gen_twins.ps1` to write a new `build\msfs2024-camera-fx-off.twins`. It refuses to write the file if any pair is ambiguous.
   2. Update the counts that `tests\classify_test.cpp` expects for the new package.
+  3. The weaker bloom is made in `patch_bloom` (`src/dxil_patch.hpp`), from the code of the tonemaps rather than their digest. `classify_test` rebuilds all of them; if some fail, the log says "left as is" for them.
 - **Lens flare parts.** The glow, star rays and ghosts are told apart by the digests of their shaders.
   - For shaders it doesn't know, the add-on goes by draw order, and the log says so: "has shaders this version does not know", followed by the VS and PS digests.
   - Check in the sim which part each of those draws by toggling the **Keep** options.

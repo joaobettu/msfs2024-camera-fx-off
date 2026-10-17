@@ -6,6 +6,9 @@
 
 #include "dxbc.hpp"
 
+#include <iterator>
+#include <utility>
+
 namespace camfx
 {
 	enum class pso_kind : uint8_t
@@ -93,6 +96,28 @@ namespace camfx
 		if (vs != nullptr && ps != nullptr && entry_point(vs, vs_size) == "vh_base" && entry_point(ps, ps_size) == "ph_base")
 			return pso_kind::material;
 		return pso_kind::none;
+	}
+
+	// The vertex shaders of screen-space sprites, which the lens flare quads are drawn with: vh_base reading exactly
+	// POSITION, TEXCOORD0, TEXCOORD1 (the corner offsets) and SV_InstanceID, in that order. 8 of the 129 vh_base in the
+	// shader package of Sim Update 7. patch_flare_quad checks the rest.
+	inline bool is_flare_quad_vs(const void *code, size_t code_size)
+	{
+		if (entry_point(code, code_size) != "vh_base")
+			return false;
+		const dxbc::span inputs = dxbc::find_part(code, code_size, dxbc::fourcc('I', 'S', 'G', '1'));
+		static constexpr std::pair<std::string_view, uint32_t> expected[] = { { "POSITION", 0 }, { "TEXCOORD", 0 }, { "TEXCOORD", 1 }, { "SV_InstanceID", 0 } };
+		uint32_t count = 0;
+		if (!dxbc::read_u32(inputs, 0, count) || count != std::size(expected))
+			return false;
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			std::string_view name;
+			uint32_t index = 0;
+			if (!dxbc::signature_element(inputs, i, name, index) || name != expected[i].first || index != expected[i].second)
+				return false;
+		}
+		return true;
 	}
 
 	// The first 4 bytes of the container digest, read as in the "#1a2b3c4d" labels: 0x1a2b3c4d. Zero if there is none.

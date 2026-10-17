@@ -1,6 +1,7 @@
 // Builds, at run time, the game's light glow pixel shaders without their star rays, using the game's own dxcompiler.dll:
-// disassemble, zero the star channel (and optionally shrink the glow), reassemble, sign. Nothing of the game's code ships
-// with the add-on; each shader is made from the one the game creates, on the user's machine.
+// disassemble, zero the star channel (and optionally shrink the glow), reassemble, sign. The lens flare quads (smaller)
+// and the tonemapping with bloom (weaker bloom) are rebuilt the same way. Nothing of the game's code ships with the
+// add-on; each shader is made from the one the game creates, on the user's machine.
 #pragma once
 
 #include <windows.h>
@@ -23,8 +24,20 @@
 namespace dxil
 {
 	// Sizes of the glow left around lights without star rays, in percent of the game's; the first is the game's own.
-	constexpr int glow_sizes[] = { 100, 75, 50, 35, 25 };
+	constexpr int glow_sizes[] = { 100, 75, 50, 25 };
 	constexpr size_t glow_size_count = std::size(glow_sizes);
+
+	// Strengths of the bloom (with its lens dirt), in percent of the game's; the first is the game's own, the last none.
+	constexpr int bloom_strengths[] = { 100, 75, 50, 25, 0 };
+	constexpr size_t bloom_strength_count = std::size(bloom_strengths);
+
+	// The shaders the add-on rebuilds smaller.
+	enum class light_shader
+	{
+		glow,       // pixel shader of city, airport and aircraft lights (patch_light)
+		flare,      // pixel shader of the light flares over aircraft lights (patch_light_flare)
+		flare_quad, // vertex shader of the lens flare quads around the sun (patch_flare_quad)
+	};
 
 	// The digest D3D12 checks in a DXIL container (bytes 4 to 19): MD5 with its own final padding (DXC's
 	// ComputeHashRetail), over the container from byte 20 on.
@@ -321,6 +334,56 @@ namespace dxil
 		std::vector<edit> _edits;
 	};
 
+	// Makes a texture sample read the texture glow_size percent as big, around its center (0.5, 0.5):
+	// saturate((uv - 0.5) * 100 / glow_size + 0.5), in instructions inserted before the sample.
+	inline bool shrink_sample(const ir_code &code, const instruction &sample, int glow_size, ir_edits &edits, std::string &what)
+	{
+		if (glow_size <= 0 || glow_size >= 100)
+			return what = "glow size out of range", false;
+		if (!code.declares("declare float @dx.op.unary.f32(i32, float)"))
+			return what = "no unary operation declared for the saturate", false;
+
+		// The sample's operands: i32 opcode, texture, sampler, then the coordinates u and v.
+		const std::string_view call = sample.rest;
+		const size_t open = call.find('(');
+		if (open == std::string_view::npos || call.back() != ')')
+			return what = "cannot read the texture sample", false;
+		std::vector<std::string_view> operands;
+		for (size_t begin = open + 1; begin < call.size();)
+		{
+			size_t end = call.find(", ", begin);
+			if (end == std::string_view::npos)
+				end = call.size() - 1;
+			operands.push_back(call.substr(begin, end - begin));
+			begin = end + 2;
+		}
+		if (operands.size() < 5 || !starts_with(operands[3], "float ") || !starts_with(operands[4], "float "))
+			return what = "cannot read the texture sample coordinates", false;
+
+		const float scale = 100.0f / float(glow_size);
+		const std::string indent = code.indent(sample);
+		std::string inserted, sampled = std::string(call.substr(0, open + 1));
+		for (size_t i = 0; i < operands.size(); ++i)
+		{
+			if (i != 0)
+				sampled += ", ";
+			if (i != 3 && i != 4)
+			{
+				sampled += operands[i];
+				continue;
+			}
+			const std::string name = std::string("%camfx_glow_") + (i == 3 ? "u" : "v");
+			inserted += indent + name + "0 = fmul fast float " + std::string(operands[i].substr(6)) + ", " + float_constant(scale) + "\n";
+			inserted += indent + name + "1 = fadd fast float " + name + "0, " + float_constant(0.5f - 0.5f * scale) + "\n";
+			inserted += indent + name + " = call float @dx.op.unary.f32(i32 7, float " + name + "1)\n";
+			sampled += "float " + name;
+		}
+		sampled += ")";
+		edits.replace(code.offset(sample.rest), sample.rest.size(), std::move(sampled));
+		edits.insert(sample.line_begin, std::move(inserted));
+		return true;
+	}
+
 	// Removes the star rays of a light glow pixel shader and, below 100 percent, shrinks the glow left around the light.
 	// The shader samples one light shape texture, with the glow in .x and the star rays in .y. The rays are scaled by an
 	// angular term that ends in "+ 0.4" (0.7 * |cos| + 0.4 on city and airport lights, 0.6 * sin^2 + 0.4 on aircraft
@@ -331,9 +394,8 @@ namespace dxil
 	//   %c = fmul fast float %ray, %b (or %b, %ray)                                      ; becomes 0.0 * %b
 	// where %b is the angular term "fadd fast float %a, 0x3FD99999A0000000" (%a a multiply by a constant) or a product
 	// with it, or %c itself is then multiplied by such a term.
-	// The glow is shrunk by sampling the texture farther from its center (0.5, 0.5),
-	// saturate((uv - 0.5) * 100 / glow_size + 0.5), in instructions inserted before the sample. Lights far away get the
-	// disc of ir_code::disc instead of that glow; it is shrunk by the same factor by multiplying the r^2 it saturates by
+	// The glow is shrunk by sampling the texture farther from its center (see shrink_sample). Lights far away get the disc
+	// of ir_code::disc instead of that glow; it is shrunk by the same factor by multiplying the r^2 it saturates by
 	// (100 / glow_size)^2.
 	inline bool patch_light(std::string &ir, int glow_size, std::string &what)
 	{
@@ -385,60 +447,66 @@ namespace dxil
 
 		if (glow_size != 100)
 		{
-			if (glow_size <= 0 || glow_size > 100)
-				return what = "glow size out of range", false;
-			if (!code.declares("declare float @dx.op.unary.f32(i32, float)"))
-				return what = "no unary operation declared for the saturate", false;
-
-			// The sample's operands: i32 opcode, texture, sampler, then the coordinates u and v.
-			const std::string_view call = sample->rest;
-			const size_t open = call.find('(');
-			if (open == std::string_view::npos || call.back() != ')')
-				return what = "cannot read the texture sample", false;
-			std::vector<std::string_view> operands;
-			for (size_t begin = open + 1; begin < call.size();)
-			{
-				size_t end = call.find(", ", begin);
-				if (end == std::string_view::npos)
-					end = call.size() - 1;
-				operands.push_back(call.substr(begin, end - begin));
-				begin = end + 2;
-			}
-			if (operands.size() < 5 || !starts_with(operands[3], "float ") || !starts_with(operands[4], "float "))
-				return what = "cannot read the texture sample coordinates", false;
-
-			const float scale = 100.0f / float(glow_size);
-			const std::string indent = code.indent(*sample);
-			std::string inserted, sampled = std::string(call.substr(0, open + 1));
-			for (size_t i = 0; i < operands.size(); ++i)
-			{
-				if (i != 0)
-					sampled += ", ";
-				if (i != 3 && i != 4)
-				{
-					sampled += operands[i];
-					continue;
-				}
-				const std::string name = std::string("%camfx_glow_") + (i == 3 ? "u" : "v");
-				inserted += indent + name + "0 = fmul fast float " + std::string(operands[i].substr(6)) + ", " + float_constant(scale) + "\n";
-				inserted += indent + name + "1 = fadd fast float " + name + "0, " + float_constant(0.5f - 0.5f * scale) + "\n";
-				inserted += indent + name + " = call float @dx.op.unary.f32(i32 7, float " + name + "1)\n";
-				sampled += "float " + name;
-			}
-			sampled += ")";
-			edits.replace(code.offset(sample->rest), sample->rest.size(), std::move(sampled));
-			edits.insert(sample->line_begin, std::move(inserted));
-
+			if (!shrink_sample(code, *sample, glow_size, edits, what))
+				return false;
 			std::string_view r2;
 			const instruction *const disc = code.disc(r2, what);
 			if (disc == nullptr)
 				return false;
+			const float scale = 100.0f / float(glow_size);
 			edits.replace(code.offset(disc->rest), disc->rest.size(), "call float @dx.op.unary.f32(i32 7, float %camfx_disc)");
-			edits.insert(disc->line_begin, indent + "%camfx_disc = fmul fast float " + std::string(r2) + ", " + float_constant(scale * scale) + "\n");
+			edits.insert(disc->line_begin, code.indent(*disc) + "%camfx_disc = fmul fast float " + std::string(r2) + ", " + float_constant(scale * scale) + "\n");
 		}
 
 		edits.apply(ir);
 		what = "'" + std::string(rays->name) + " = " + rays_before + "' now multiplies 0 instead of the star channel";
+		return true;
+	}
+
+	// Shrinks the quads of the lens flare (glow, star rays and ghosts) around their own centers. Their vertex shader takes
+	// each corner's offset from the quad center in TEXCOORD1.xy (input element 2), and multiplies each by the same size:
+	//   %x = call float @dx.op.loadInput.f32(i32 4, i32 2, i32 0, i8 0, i32 undef)  ; used only by:
+	//   %a = fmul fast float %size, %x                                             ; becomes %camfx_size * %x
+	//   %y = call float @dx.op.loadInput.f32(i32 4, i32 2, i32 0, i8 1, i32 undef)  ; used only by:
+	//   %b = fmul fast float %size, %y                                             ; becomes %camfx_size * %y
+	// with %camfx_size = %size * quad_size / 100 inserted before the first of the two, in the same block.
+	inline bool patch_flare_quad(std::string &ir, int quad_size, std::string &what)
+	{
+		if (quad_size <= 0 || quad_size >= 100)
+			return what = "quad size out of range", false;
+		const ir_code code(ir);
+		const instruction *corner[2];
+		const instruction *scaled[2];
+		std::string_view size[2];
+		for (int axis = 0; axis < 2; ++axis)
+		{
+			const std::string load = std::string("call float @dx.op.loadInput.f32(i32 4, i32 2, i32 0, i8 ") + char('0' + axis) + ", ";
+			corner[axis] = code.find_one([&](const instruction &i) { return starts_with(i.rest, load); }, axis == 0 ? "corner x input" : "corner y input", what);
+			if (corner[axis] == nullptr)
+				return false;
+			scaled[axis] = code.find_one([&](const instruction &i) { return replace_value(i.rest, corner[axis]->name, "%") != i.rest; },
+				axis == 0 ? "single use of the corner x" : "single use of the corner y", what);
+			std::string_view a, b;
+			if (scaled[axis] == nullptr)
+				return false;
+			if (!ir_code::multiply(*scaled[axis], a, b) || (a != corner[axis]->name && b != corner[axis]->name))
+				return what = "the corner is not multiplied by a size", false;
+			size[axis] = a == corner[axis]->name ? b : a;
+		}
+		if (size[0] != size[1])
+			return what = "the corners are multiplied by different sizes", false;
+		const instruction *const first = scaled[0]->line_begin < scaled[1]->line_begin ? scaled[0] : scaled[1];
+		const instruction *const second = first == scaled[0] ? scaled[1] : scaled[0];
+		const std::string_view between = std::string_view(ir).substr(first->line_begin, second->line_begin - first->line_begin);
+		if (between.find("; <label>") != std::string_view::npos || between.find(" br ") != std::string_view::npos)
+			return what = "the corners are scaled in different blocks", false;
+
+		ir_edits edits;
+		for (int axis = 0; axis < 2; ++axis)
+			edits.replace(code.offset(scaled[axis]->rest), scaled[axis]->rest.size(), "fmul fast float %camfx_size, " + std::string(corner[axis]->name));
+		edits.insert(first->line_begin, code.indent(*first) + "%camfx_size = fmul fast float " + std::string(size[0]) + ", " + float_constant(float(quad_size) / 100.0f) + "\n");
+		edits.apply(ir);
+		what = "the quad corners scaled to " + std::to_string(quad_size) + "%";
 		return true;
 	}
 
@@ -497,6 +565,79 @@ namespace dxil
 		return true;
 	}
 
+	// Weakens the bloom of a tonemapping pixel shader to 'strength' percent (0 for none), with its lens dirt. The shader
+	// samples the lens dirt texture (t8) once and makes it a factor, by which one branch adds the bloom to the scene color
+	// and the other blends the scene color toward the bloom (the game picks one with a constant). Right after the branches:
+	//   %r = phi float [ %added_r, ... ], [ %blended_r, ... ]  ; and %g, %b: what the bloom adds to the scene color
+	//   %x = fadd fast float %r, %scene_r                       ; becomes %camfx_bloom0 + %scene_r, and so on
+	// The three phis must be the first ones after the lens dirt sample, each used once, by an fadd. What they add is
+	// multiplied by strength / 100 right after them.
+	inline bool patch_bloom(std::string &ir, int strength, std::string &what)
+	{
+		if (strength < 0 || strength >= 100)
+			return what = "bloom strength out of range", false;
+		const ir_code code(ir);
+		const instruction *const binding = code.find_one([](const instruction &i) {
+			return starts_with(i.rest, "call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 8, i32 8, i32 0, i8 0 }, ");
+		}, "lens dirt texture at t8", what);
+		if (binding == nullptr)
+			return false;
+		const std::string annotate = "call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle " + std::string(binding->name) + ", ";
+		const instruction *const handle = code.find_one([&](const instruction &i) { return starts_with(i.rest, annotate); }, "annotated lens dirt texture", what);
+		if (handle == nullptr)
+			return false;
+		const std::string sampled = "call %dx.types.ResRet.f32 @dx.op.sample.f32(i32 60, %dx.types.Handle " + std::string(handle->name) + ", ";
+		const instruction *const dirt = code.find_one([&](const instruction &i) { return starts_with(i.rest, sampled); }, "sample of the lens dirt", what);
+		if (dirt == nullptr)
+			return false;
+
+		const std::vector<instruction> &all = code.all();
+		size_t first = 0;
+		while (first < all.size() && all[first].line_begin <= dirt->line_begin)
+			++first;
+		while (first < all.size() && !starts_with(all[first].rest, "phi float "))
+			++first;
+		const auto phi = [&](size_t i) { return i < all.size() && starts_with(all[i].rest, "phi float "); };
+		if (!phi(first) || !phi(first + 1) || !phi(first + 2) || all[first + 1].line_begin != all[first].line_end + 1 ||
+			all[first + 2].line_begin != all[first + 1].line_end + 1)
+			return what = "no three phis after the lens dirt sample", false;
+		if (phi(first + 3) && all[first + 3].line_begin == all[first + 2].line_end + 1)
+			return what = "more than three phis after the lens dirt sample", false;
+
+		ir_edits edits;
+		std::string scaled, first_use;
+		for (size_t c = 0; c < 3; ++c)
+		{
+			const instruction &merged = all[first + c];
+			// Each phi is used once in the whole text (void calls such as the output stores are not in 'all'), by an fadd.
+			size_t uses = 0;
+			const instruction *added = nullptr;
+			for (size_t at = 0; (at = ir.find(merged.name, at)) != std::string::npos; at += merged.name.size())
+			{
+				const size_t after = at + merged.name.size();
+				if (after < ir.size() && (std::isalnum(static_cast<unsigned char>(ir[after])) || ir[after] == '_' || ir[after] == '.'))
+					continue;
+				if (at == code.offset(merged.name))
+					continue;
+				++uses;
+				for (const instruction &i : all)
+					if (at >= code.offset(i.rest) && at < code.offset(i.rest) + i.rest.size())
+						added = &i;
+			}
+			if (uses != 1 || added == nullptr || !starts_with(added->rest, "fadd fast float "))
+				return what = "what the bloom adds is not just added to the scene color", false;
+			const std::string name = "%camfx_bloom" + std::to_string(c);
+			if (c == 0)
+				first_use = std::string(added->name) + " = " + std::string(added->rest);
+			edits.replace(code.offset(added->rest), added->rest.size(), replace_value(added->rest, merged.name, name));
+			scaled += code.indent(merged) + name + " = fmul fast float " + std::string(merged.name) + ", " + float_constant(float(strength) / 100.0f) + "\n";
+		}
+		edits.insert(all[first + 2].line_end + 1, std::move(scaled));
+		edits.apply(ir);
+		what = "the bloom and lens dirt added at " + std::to_string(strength) + "% ('" + first_use + "' and two more like it)";
+		return true;
+	}
+
 	// The game's dxcompiler.dll. Not thread-safe: callers serialize.
 	class compiler
 	{
@@ -514,20 +655,40 @@ namespace dxil
 			return true;
 		}
 
-		// A light glow pixel shader (patch_light) or light flare pixel shader (patch_light_flare) without its star rays, once
-		// per glow size: out[i] for glow_sizes[i], signed, or empty when that size could not be made. False when not even the
-		// one at the game's size could. 'what' describes the change, then any failure.
-		bool make_light_variants(bool flare, const void *code, size_t size, std::vector<std::vector<uint8_t>> &out, std::string &what)
+		// A light glow pixel shader (patch_light) or light flare pixel shader (patch_light_flare) without its star rays, or a
+		// lens flare vertex shader (patch_flare_quad), once per size: out[i] for glow_sizes[i], signed, or empty when that
+		// size could not be made. The lens flare at the game's size is the game's own shader, so out[0] stays empty for it.
+		// False when the first variant could not be made. 'what' describes the change, then any failure.
+		bool make_light_variants(light_shader shader, const void *code, size_t size, std::vector<std::vector<uint8_t>> &out, std::string &what)
 		{
-			out.assign(glow_size_count, {});
+			return make_variants(code, size, glow_sizes, glow_size_count, shader == light_shader::flare_quad ? 1 : 0, "glow size", [shader](std::string &ir, int value, std::string &step) {
+				return shader == light_shader::glow ? patch_light(ir, value, step) : shader == light_shader::flare ? patch_light_flare(ir, value, step) : patch_flare_quad(ir, value, step);
+			}, out, what);
+		}
+
+		// A tonemapping pixel shader with bloom (patch_bloom), once per strength: out[i] for bloom_strengths[i], signed, or empty
+		// when that strength could not be made. The game's strength is its own shader, so out[0] stays empty. False when the
+		// first variant could not be made. 'what' describes the change, then any failure.
+		bool make_bloom_variants(const void *code, size_t size, std::vector<std::vector<uint8_t>> &out, std::string &what)
+		{
+			return make_variants(code, size, bloom_strengths, bloom_strength_count, 1, "bloom strength", patch_bloom, out, what);
+		}
+
+	private:
+		// The shader patched once per value, from values[first] on (see the two functions above).
+		template <typename Patch>
+		bool make_variants(const void *code, size_t size, const int *values, size_t count, size_t first, const char *value_name, Patch &&patch,
+			std::vector<std::vector<uint8_t>> &out, std::string &what)
+		{
+			out.assign(count, {});
 			std::string ir;
 			if (!disassemble(code, size, ir, what))
 				return false;
-			for (size_t i = 0; i < glow_size_count; ++i)
+			for (size_t i = first; i < count; ++i)
 			{
 				std::string patched = ir, step;
-				const bool ok = (flare ? patch_light_flare(patched, glow_sizes[i], step) : patch_light(patched, glow_sizes[i], step)) && assemble(patched, out[i], step);
-				if (i == 0)
+				const bool ok = patch(patched, values[i], step) && assemble(patched, out[i], step);
+				if (i == first)
 				{
 					what = step;
 					if (!ok)
@@ -535,13 +696,12 @@ namespace dxil
 				}
 				else if (!ok)
 				{
-					what += "; glow size " + std::to_string(glow_sizes[i]) + "% not made: " + step;
+					what += "; " + std::string(value_name) + " " + std::to_string(values[i]) + "% not made: " + step;
 				}
 			}
 			return true;
 		}
 
-	private:
 		bool disassemble(const void *code, size_t size, std::string &ir, std::string &error)
 		{
 			if (_utils == nullptr)

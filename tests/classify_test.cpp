@@ -2,6 +2,8 @@
 // - the add-on recognizes exactly the expected bloom tonemapping shaders, and the lens flare elements of its table are
 //   in the package, as material pipelines;
 // - every bloom permutation has a twin in the .twins file, and each twin is the matching permutation without bloom;
+// - with the game's dxcompiler.dll, every shader the add-on rebuilds (lights, lens flare quads, bloom tonemapping) is
+//   rebuilt at every size or strength;
 // - the parsers never read out of bounds on corrupted bytecode (inputs end right before an inaccessible page).
 #include "../src/classify.hpp"
 #include "../src/twins.hpp"
@@ -200,11 +202,13 @@ int wmain(int argc, wchar_t **argv)
 	}
 
 	size_t tonemap = 0, signed_ok = 0;
-	std::vector<container> bloom_tonemaps, light_glows, light_flares;
+	std::vector<container> bloom_tonemaps, light_glows, light_flares, flare_quads;
 	for (const container &c : containers)
 	{
 		const uint8_t *code = pak.data() + c.offset;
 		tonemap += camfx::entry_point(code, c.size) == "ph_tonemapping";
+		if (camfx::is_flare_quad_vs(code, c.size))
+			flare_quads.push_back(c);
 		const camfx::pso_kind kind = camfx::classify_pixel_shader(code, c.size);
 		if (kind == camfx::pso_kind::tonemap_bloom)
 			bloom_tonemaps.push_back(c);
@@ -219,12 +223,14 @@ int wmain(int argc, wchar_t **argv)
 		signed_ok += dxil::signed_correctly(code, c.size);
 	}
 	const size_t bloom = bloom_tonemaps.size();
-	printf("ph_tonemapping %zu, tonemap_bloom %zu, light_glow %zu, light_flare %zu\n", tonemap, bloom, light_glows.size(), light_flares.size());
+	printf("ph_tonemapping %zu, tonemap_bloom %zu, light_glow %zu, light_flare %zu, lens flare quad vertex shaders %zu\n", tonemap, bloom, light_glows.size(),
+		light_flares.size(), flare_quads.size());
 	check(bloom >= 1 && bloom < tonemap, "some, not all, tonemapping permutations have bloom");
 	check(signed_ok == containers.size(), "the DXIL hash matches the digest of every container (" + std::to_string(signed_ok) + " of " + std::to_string(containers.size()) + ")");
 
 	// Every light glow and light flare pixel shader rebuilt without star rays by the game's dxcompiler.dll, at every glow
-	// size: signed, and still recognized as what it was.
+	// size, and every lens flare quad vertex shader with smaller quads, at every size below 100%: signed, and still
+	// recognized as what it was.
 	if (argc >= 4)
 	{
 		dxil::compiler dxc;
@@ -233,24 +239,48 @@ int wmain(int argc, wchar_t **argv)
 			check(false, ("load the game's dxcompiler.dll: " + error).c_str());
 		else
 		{
-			const auto rebuild = [&](const std::vector<container> &shaders, camfx::pso_kind kind) {
+			const auto rebuild = [&](const std::vector<container> &shaders, dxil::light_shader shader) {
 				size_t rebuilt = 0;
 				for (const container &c : shaders)
 				{
 					const uint8_t *code = pak.data() + c.offset;
 					std::vector<std::vector<uint8_t>> variants;
 					std::string what;
-					const bool ok = dxc.make_light_variants(kind == camfx::pso_kind::light_flare, code, c.size, variants, what);
+					const bool ok = dxc.make_light_variants(shader, code, c.size, variants, what);
 					printf("  %s %s: %s\n", std::string(camfx::entry_point(code, c.size)).c_str(), camfx::to_hex(digest_of(code, c.size)).substr(0, 8).c_str(), what.c_str());
 					size_t good = 0;
 					for (const std::vector<uint8_t> &v : variants)
-						good += !v.empty() && dxil::signed_correctly(v.data(), v.size()) && camfx::classify_pixel_shader(v.data(), v.size()) == kind;
-					rebuilt += ok && good == dxil::glow_size_count;
+						good += !v.empty() && dxil::signed_correctly(v.data(), v.size()) &&
+							(shader == dxil::light_shader::flare_quad ? camfx::is_flare_quad_vs(v.data(), v.size()) :
+								camfx::classify_pixel_shader(v.data(), v.size()) == (shader == dxil::light_shader::flare ? camfx::pso_kind::light_flare : camfx::pso_kind::light_glow));
+					// The lens flare at the game's size is the game's own shader.
+					rebuilt += ok && good == dxil::glow_size_count - (shader == dxil::light_shader::flare_quad ? 1 : 0);
 				}
 				return !shaders.empty() && rebuilt == shaders.size();
 			};
-			check(rebuild(light_glows, camfx::pso_kind::light_glow), "every light glow pixel shader rebuilt without star rays at every glow size, signed and still recognized");
-			check(rebuild(light_flares, camfx::pso_kind::light_flare), "every light flare pixel shader rebuilt without its star at every glow size, signed and still recognized");
+			check(rebuild(light_glows, dxil::light_shader::glow), "every light glow pixel shader rebuilt without star rays at every glow size, signed and still recognized");
+			check(rebuild(light_flares, dxil::light_shader::flare), "every light flare pixel shader rebuilt without its star at every glow size, signed and still recognized");
+			check(rebuild(flare_quads, dxil::light_shader::flare_quad), "every lens flare quad vertex shader rebuilt with smaller quads at every size, signed and still recognized");
+
+			// Every bloom tonemapping permutation rebuilt with weaker bloom, at every strength below the game's. Only the first
+			// one and any failures are listed.
+			size_t weaker = 0;
+			for (const container &c : bloom_tonemaps)
+			{
+				const uint8_t *code = pak.data() + c.offset;
+				std::vector<std::vector<uint8_t>> variants;
+				std::string what;
+				const bool ok = dxc.make_bloom_variants(code, c.size, variants, what);
+				size_t good = 0;
+				for (const std::vector<uint8_t> &v : variants)
+					good += !v.empty() && dxil::signed_correctly(v.data(), v.size()) && camfx::classify_pixel_shader(v.data(), v.size()) == camfx::pso_kind::tonemap_bloom;
+				const bool all = ok && good == dxil::bloom_strength_count - 1;
+				if (weaker == 0 || !all)
+					printf("  ph_tonemapping %s: %s%s\n", camfx::to_hex(digest_of(code, c.size)).substr(0, 8).c_str(), what.c_str(), all ? "" : " (FAIL)");
+				weaker += all;
+			}
+			check(!bloom_tonemaps.empty() && weaker == bloom_tonemaps.size(), "every bloom tonemapping permutation rebuilt with weaker bloom at every strength (" +
+				std::to_string(weaker) + " of " + std::to_string(bloom_tonemaps.size()) + "), signed and still recognized");
 		}
 	}
 
@@ -271,6 +301,8 @@ int wmain(int argc, wchar_t **argv)
 		check(billboard == 3 && macro == 2 && light_glows.size() == 5, "5 light glow pixel shaders: 3 for city and airport lights, 2 for aircraft lights");
 		const auto flare = [&](size_t i) { return light_flares.size() > i ? camfx::to_hex(digest_of(pak.data() + light_flares[i].offset, light_flares[i].size)).substr(0, 8) : std::string(); };
 		check(light_flares.size() == 2 && flare(0) == "2b398c27" && flare(1) == "979163b3", "2 light flare pixel shaders, 2b398c27 and 979163b3 (of about 3080 ph_base)");
+		if (expected_containers == 8334)
+			check(flare_quads.size() == 8, "8 lens flare quad vertex shaders (of 129 vh_base), among them aafcc02e and 9bee5ecc");
 
 		size_t found = 0;
 		for (const flare_element &e : flare_elements)

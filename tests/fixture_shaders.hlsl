@@ -98,12 +98,30 @@ float4 vh_fullscreen(uint id : SV_VertexID) : SV_Position
 	return float4(fullscreen_uv(id) * float2(2, -2) + float2(-1, 1), 0, 1);
 }
 
-// Material shaders, as the game uses for its lens flare quads: a strip whose first triangle already covers the target.
+#ifdef FLARE_QUAD
+// The vertex shader of the lens flare quads, like the game's screen-space sprite permutations of vh_base: the corner's
+// offset from the quad center in TEXCOORD1.xy, times the element's size (0.9 here), so the quad covers 90% of the
+// viewport around its center.
+struct FlareQuadInput
+{
+	float4 position : POSITION;
+	float2 uv : TEXCOORD0;
+	float3 corner : TEXCOORD1;
+	uint instance : SV_InstanceID;
+};
+
+float4 vh_base(FlareQuadInput i) : SV_Position
+{
+	return float4(i.corner.xy * 0.9, i.position.z, i.position.w);
+}
+#else
+// Material shaders, as the game uses for transparent geometry: a strip whose first triangle already covers the target.
 float4 vh_base(uint id : SV_VertexID) : SV_Position
 {
 	const float2 corner = float2((id & 1) ? 3 : -1, (id & 2) ? 3 : -1);
 	return float4(corner, 0, 1);
 }
+#endif
 
 // Three lens flare elements with shaders the add-on does not know, so it tells them apart by draw order:
 // the default one is drawn first (glow), ALT second (star rays), ALT2 after them (ghosts).
@@ -135,13 +153,28 @@ TonemapVertex vh_fullscreen_tex(uint id : SV_VertexID)
 }
 
 #ifdef WITH_BLOOM
+// Compiled for shader model 6.6, like the game's, which binds resources the way the add-on looks for the lens dirt.
 Texture2D<float4> lens_dirt : register(t8);
+SamplerState lens_dirt_sampler : register(s0);
 #endif
 
+// With bloom, like the game's: the lens dirt sampled once makes a factor, by which one branch adds the bloom to the scene
+// color and the other (never taken here) blends the scene color toward the bloom; what the bloom adds is then added to
+// the scene color. At the pixel the fixture reads, the dirt is gray (about 0.5, alpha 1): the scene color is (0, 0, 1)
+// and the bloom about (2, 0, -1), so the bloom adds about (1, 0, -0.5) times its strength. Every value comes from the
+// texture, so that the compiler keeps the additions. Without bloom: the scene color alone.
 float4 ph_tonemapping(float4 position : SV_Position) : SV_Target
 {
 #ifdef WITH_BLOOM
-	return float4(1, 0, lens_dirt.Load(int3(0, 0, 0)).r, 1);
+	const float4 dirt = lens_dirt.Sample(lens_dirt_sampler, position.xy / 4);
+	const float3 scene = max(float3(dirt.a - 1, dirt.a - 1, dirt.a), 0);
+	const float3 bloom = float3(dirt.r * 4, dirt.g - 0.5, dirt.b * -2);
+	float3 added;
+	[branch] if (dirt.a < -1)
+		added = saturate(dirt.rgb) * (bloom - scene);
+	else
+		added = dirt.rgb * bloom;
+	return float4(added + scene, 1);
 #else
 	return float4(0, 0, 1, 1);
 #endif
