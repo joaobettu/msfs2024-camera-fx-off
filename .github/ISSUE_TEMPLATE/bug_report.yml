@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report this. The add-on is in beta, so every report helps.
+        Thanks for taking the time to report this. Every report helps.
         For a security problem, don't open an issue: use [Report a vulnerability](https://github.com/joaobettu/msfs2024-camera-fx-off/security/advisories/new) instead.
   - type: textarea
     id: what-happened

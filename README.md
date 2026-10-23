@@ -3,7 +3,7 @@
 By **PdPanoo**
 
 > [!NOTE]
-> **This add-on is in beta.** Please report any problem, and send any feedback, through the [GitHub issues](https://github.com/joaobettu/msfs2024-camera-fx-off/issues). Attaching `msfs2024-camera-fx-off.log` from the game folder helps a lot.
+> Please report any problem, and send any feedback, through the [GitHub issues](https://github.com/joaobettu/msfs2024-camera-fx-off/issues). Attaching `msfs2024-camera-fx-off.log` from the game folder helps a lot.
 
 A ReShade add-on that removes the "filmed with a camera" look from Microsoft Flight Simulator 2024:
 
@@ -38,7 +38,7 @@ Still images: lens flare [on](docs/images/lens_flare_on.jpg) and [off](docs/imag
 ## Requirements
 
 - ReShade 6.8 or newer, the version **with full add-on support**.
-- Microsoft Flight Simulator 2024 (DirectX 12). Tested with the Steam version, before and after Sim Update 7.
+- Microsoft Flight Simulator 2024 (DirectX 12). Tested with the Steam version, before and after Sim Update 7, and with Sim Update 7.1.
   - The star ray removal, the size of the kept lens flare parts and the weaker bloom use the `Dxcompiler.DLL` that comes with the sim, next to its executable, to rebuild those shaders on your machine. Without it, the star rays stay, the kept parts keep the game's size, and the bloom is either removed or the game's.
 - Works alongside other add-ons, such as *Glass Cockpit DLSS Fix*.
 
@@ -206,7 +206,7 @@ The scripts look for the game in your Steam libraries. For other installs (such 
 What the tests cover:
 
 - `classify_test` runs against the real `SHADERSPAK`, read-only.
-  - It checks the counts: 770 tonemaps, 384 of them with bloom. These are the counts for the shader packages the add-on was tested with (`SHADERSPAK.d5d2118d.SM6.PC.PAK`, before and after Sim Update 7, which rebuilt it under the same name); a sim update may change them.
+  - It checks the counts: 770 tonemaps, 384 of them with bloom. These are the counts for the shader packages the add-on was tested with (`SHADERSPAK.d5d2118d.SM6.PC.PAK`, before and after Sim Update 7, which rebuilt it under the same name, and after Sim Update 7.1, which moved some of its shaders without changing its name or size); a sim update may change them.
   - It checks that the 5 lens flare elements the add-on knows are in that package, as `vh_base`/`ph_base` pipelines, each with its part.
   - It validates every pair in the table.
   - It checks that the light shaders are recognized: 3 for city and airport lights, 2 for aircraft lights and 2 light flares. So are the 8 lens flare quad vertex shaders.

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping with MSFS 2024 Camera FX Off. The add-on is in beta, so bug reports and feedback from different setups are the most useful contribution right now.
+Thanks for helping with MSFS 2024 Camera FX Off. Bug reports and feedback from different setups are the most useful contribution.
 
 ## Reporting a problem
 
