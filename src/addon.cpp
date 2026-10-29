@@ -14,6 +14,7 @@
 
 #include "classify.hpp"
 #include "dxil_patch.hpp"
+#include "shortcut.hpp"
 #include "twins.hpp"
 #include "version.h"
 
@@ -60,26 +61,36 @@ namespace
 	// Size of the glow left around those lights, as an index in dxil::glow_sizes (the game's size first): 50% by default.
 	// Stored in percent.
 	std::atomic<uint32_t> g_light_glow_size { 2 };
-	// Pressed together with Ctrl+Shift. F9 to F12 are taken by the Glass Cockpit DLSS Fix add-on. The frame trace has no
-	// shortcut: it is recorded from the overlay.
-	UINT g_key_flare = VK_F5, g_key_bloom = VK_F6, g_key_light_star = VK_F7;
+	// Shortcuts, by action: Ctrl+Shift+F5, F6 and F7 by default, and any other from the overlay. F9 to F12 are taken by the
+	// Glass Cockpit DLSS Fix add-on by default. The frame trace has no shortcut: it is recorded from the overlay. Used on the
+	// present thread only (presents and the overlay).
+	enum action : size_t
+	{
+		action_flare,
+		action_bloom,
+		action_light_star,
+		action_count,
+	};
+	constexpr camfx::shortcut default_shortcuts[action_count] = { { VK_F5, true, true, false }, { VK_F6, true, true, false }, { VK_F7, true, true, false } };
+	camfx::shortcut g_shortcuts[action_count] = { default_shortcuts[0], default_shortcuts[1], default_shortcuts[2] };
+	const wchar_t *const g_shortcut_keys[action_count] = { L"key_flare", L"key_bloom", L"key_light_star" };
+	// Settings that could not be read, for the log (which is opened after the settings are read).
+	std::string g_settings_notes;
 
 	std::wstring g_ini_path, g_log_path, g_trace_path, g_twins_path, g_pak_override, g_dxcompiler_override;
-
-	std::string key_name(UINT vk)
-	{
-		if (vk >= VK_F1 && vk <= VK_F24)
-			return "F" + std::to_string(vk - VK_F1 + 1);
-		char text[16];
-		snprintf(text, sizeof(text), "0x%02X", vk);
-		return text;
-	}
 
 	std::wstring widen(const std::string &s)
 	{
 		std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0), L'\0');
 		MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), int(w.size()));
 		return w;
+	}
+
+	std::string narrow(const std::wstring &s)
+	{
+		std::string n(WideCharToMultiByte(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0, nullptr, nullptr), '\0');
+		WideCharToMultiByte(CP_UTF8, 0, s.data(), int(s.size()), n.data(), int(n.size()), nullptr, nullptr);
+		return n;
 	}
 
 	// A path without its folders. The log only names files, so it never shows where the user installed the game,
@@ -109,9 +120,19 @@ namespace
 		g_bloom_strength = nearest(L"bloom_strength", 0, dxil::bloom_strengths, dxil::bloom_strength_count);
 		g_light_star_off = get(L"light_star_off", 1) != 0;
 		g_light_glow_size = nearest(L"light_glow_size", 50, dxil::glow_sizes, dxil::glow_size_count);
-		g_key_flare = UINT(get(L"key_flare", VK_F5));
-		g_key_bloom = UINT(get(L"key_bloom", VK_F6));
-		g_key_light_star = UINT(get(L"key_light_star", VK_F7));
+		// Shortcuts as text ("Ctrl+Shift+F5"), or the key code of earlier versions, always pressed with Ctrl+Shift.
+		for (size_t i = 0; i < action_count; ++i)
+		{
+			wchar_t text[64] = L"";
+			if (GetPrivateProfileStringW(L"settings", g_shortcut_keys[i], L"", text, DWORD(std::size(text)), g_ini_path.c_str()) == 0)
+				continue;
+			camfx::shortcut read;
+			if (camfx::parse_shortcut(narrow(text), read))
+				g_shortcuts[i] = read;
+			else
+				g_settings_notes += "settings: " + narrow(g_shortcut_keys[i]) + "=" + narrow(text) + " not understood, so " +
+					camfx::shortcut_text(g_shortcuts[i]) + " is used\n";
+		}
 
 		wchar_t path[MAX_PATH] = L"";
 		GetPrivateProfileStringW(L"settings", L"pak_path", L"", path, MAX_PATH, g_ini_path.c_str());
@@ -131,6 +152,8 @@ namespace
 		WritePrivateProfileStringW(L"settings", L"bloom_strength", std::to_wstring(dxil::bloom_strengths[g_bloom_strength]).c_str(), g_ini_path.c_str());
 		put(L"light_star_off", g_light_star_off);
 		WritePrivateProfileStringW(L"settings", L"light_glow_size", std::to_wstring(dxil::glow_sizes[g_light_glow_size]).c_str(), g_ini_path.c_str());
+		for (size_t i = 0; i < action_count; ++i)
+			WritePrivateProfileStringW(L"settings", g_shortcut_keys[i], widen(camfx::shortcut_text(g_shortcuts[i])).c_str(), g_ini_path.c_str());
 		// Keys of earlier versions
 		for (const wchar_t *const key : { L"flare_keep", L"light_glow_off", L"light_point_off", L"key_trace" })
 			WritePrivateProfileStringW(L"settings", key, nullptr, g_ini_path.c_str());
@@ -294,8 +317,9 @@ namespace
 	std::mutex g_pso_mutex;
 	pso_table g_psos;
 	std::atomic<uint32_t> g_pso_count[camfx::pso_kind_count] = {};
-	// Tonemaps whose bloom can be removed, and those whose bloom can be weakened (see bloom_twins)
-	std::atomic<uint32_t> g_twin_count { 0 }, g_twin_missing { 0 }, g_twin_failed { 0 }, g_weaker_count { 0 }, g_weaker_failed { 0 };
+	// Tonemaps whose bloom can be removed, and those whose bloom can be weakened (see bloom_twins). Twins of the package that
+	// could not be used: not in the .twins file, different in the package (another sim version), or refused by the device.
+	std::atomic<uint32_t> g_twin_count { 0 }, g_twin_missing { 0 }, g_twin_differs { 0 }, g_twin_failed { 0 }, g_weaker_count { 0 }, g_weaker_failed { 0 };
 
 	// Entry points and short digests of every pipeline's shaders, to label frame traces and the log.
 	std::shared_mutex g_name_mutex;
@@ -307,21 +331,34 @@ namespace
 	std::once_flag g_twins_once;
 	camfx::twin_table g_twins;
 	std::wstring g_pak_path;
-	std::atomic<bool> g_twins_ok { false };
-	std::atomic<bool> g_twins_tried { false };
+	// Whether the twins can be read from the shader package, or why not. Without them, the add-on removes the bloom with the
+	// tonemapping shaders it rebuilds (see create_bloom_twins).
+	enum class twins_state : uint8_t
+	{
+		not_loaded,
+		ok,
+		missing,       // no .twins file next to the add-on
+		unreadable,    // a .twins file that cannot be parsed
+		no_package,    // the shader package it names is not where the sim keeps it
+		other_package, // a shader package of another size: another sim version
+	};
+	std::atomic<twins_state> g_twins_state { twins_state::not_loaded };
 
 	void load_twins()
 	{
-		g_twins_tried = true;
+		// What the add-on does instead, for the log.
+		static const char *const instead = "the add-on rebuilds the tonemapping shaders to remove the bloom instead";
 		std::string text, error;
 		if (!camfx::read_file(g_twins_path, text))
 		{
-			log("twins: %S not found next to the add-on, bloom removal unavailable (run tools\\gen_twins.ps1)", file_name(g_twins_path).c_str());
+			log("twins: %S not found next to the add-on; %s", file_name(g_twins_path).c_str(), instead);
+			g_twins_state = twins_state::missing;
 			return;
 		}
 		if (!camfx::parse_twin_table(text, g_twins, error))
 		{
-			log("twins: %S: %s", file_name(g_twins_path).c_str(), error.c_str());
+			log("twins: %S: %s; %s", file_name(g_twins_path).c_str(), error.c_str(), instead);
+			g_twins_state = twins_state::unreadable;
 			return;
 		}
 
@@ -341,18 +378,21 @@ namespace
 		WIN32_FILE_ATTRIBUTE_DATA attributes;
 		if (!GetFileAttributesExW(g_pak_path.c_str(), GetFileExInfoStandard, &attributes))
 		{
-			log("twins: shader package %S not found %s (sim updated? run tools\\gen_twins.ps1 again)", file_name(g_pak_path).c_str(),
-				g_pak_override.empty() ? "in the game's Shaders folder" : "at the pak_path from the settings");
+			log("twins: shader package %S not found %s (sim updated?); %s", file_name(g_pak_path).c_str(),
+				g_pak_override.empty() ? "in the game's Shaders folder" : "at the pak_path from the settings", instead);
+			g_twins_state = twins_state::no_package;
 			return;
 		}
 		const uint64_t size = (uint64_t(attributes.nFileSizeHigh) << 32) | attributes.nFileSizeLow;
 		if (g_twins.pak_size != 0 && size != g_twins.pak_size)
 		{
-			log("twins: shader package is %llu bytes but the twins file expects %llu (sim updated? run tools\\gen_twins.ps1 again)", size, g_twins.pak_size);
+			log("twins: shader package is %llu bytes but the .twins file expects %llu: the .twins file is for another version of the sim's shaders "
+				"(a matching one comes with the add-on version for that sim version, or from tools\\gen_twins.ps1); %s", size, g_twins.pak_size, instead);
+			g_twins_state = twins_state::other_package;
 			return;
 		}
 
-		g_twins_ok = true;
+		g_twins_state = twins_state::ok;
 		log("twins: %zu pairs for %S", g_twins.entries.size(), file_name(g_pak_path).c_str());
 	}
 
@@ -391,7 +431,7 @@ namespace
 		std::call_once(g_twins_once, load_twins);
 
 		camfx::digest16 digest;
-		if (!g_twins_ok || !dxbc::digest(ps.code, ps.code_size, digest.bytes))
+		if (g_twins_state != twins_state::ok || !dxbc::digest(ps.code, ps.code_size, digest.bytes))
 		{
 			g_twin_missing++;
 			return 0;
@@ -407,10 +447,11 @@ namespace
 
 		std::vector<uint8_t> code;
 		std::string error;
-		if (!camfx::read_twin(g_pak_path, it->second, code, error))
+		bool differs = false;
+		if (!camfx::read_twin(g_pak_path, it->second, code, error, &differs))
 		{
-			log("twins: %s", error.c_str());
-			g_twin_failed++;
+			log("twins: tonemapping %s: %s", camfx::to_hex(digest).c_str(), error.c_str());
+			(differs ? g_twin_differs : g_twin_failed)++;
 			return 0;
 		}
 
@@ -597,7 +638,7 @@ namespace
 			if (twins->pipelines[i] == 0)
 				log("bloom: creating the pipeline with weaker bloom (strength %d%%) for %s failed", dxil::bloom_strengths[i], camfx::to_hex(digest).c_str());
 			else if (i == none)
-				log("bloom: tonemapping %s has no twin in the shader package; the rebuilt shader removes its bloom", camfx::to_hex(digest).c_str());
+				log("bloom: tonemapping %s has no usable twin in the shader package; the rebuilt shader removes its bloom", camfx::to_hex(digest).c_str());
 			else
 				weaker = true;
 		}
@@ -1227,6 +1268,11 @@ namespace
 		log("%s %s", what, value ? "on" : "off");
 	}
 
+	// The shortcut being set from the overlay (action_count when none), and whether one was set this frame: the keys pressed
+	// for it must not also fire it.
+	size_t g_capture = action_count;
+	bool g_captured_now = false;
+
 	void on_present(effect_runtime *runtime)
 	{
 		if (g_tracing.load())
@@ -1234,31 +1280,125 @@ namespace
 		else if (g_trace_requested.exchange(false))
 			g_tracing = true;
 
-		if (runtime->is_key_down(VK_CONTROL) && runtime->is_key_down(VK_SHIFT))
+		// A shortcut fires when its key is pressed with exactly its modifiers.
+		if (g_capture == action_count && !g_captured_now)
 		{
-			if (runtime->is_key_pressed(g_key_flare))
+			const bool ctrl = runtime->is_key_down(VK_CONTROL), shift = runtime->is_key_down(VK_SHIFT), alt = runtime->is_key_down(VK_MENU);
+			const auto pressed = [&](action a) {
+				const camfx::shortcut &s = g_shortcuts[a];
+				return s.key != 0 && s.ctrl == ctrl && s.shift == shift && s.alt == alt && runtime->is_key_pressed(s.key);
+			};
+			if (pressed(action_flare))
 				toggle(g_sun_flare_off, "lens flare removal");
-			if (runtime->is_key_pressed(g_key_bloom))
+			if (pressed(action_bloom))
 			{
 				// Between the strength set and the game's bloom.
 				g_bloom_off = !g_bloom_off;
 				save_settings();
 				log("bloom at %d%%%s", dxil::bloom_strengths[bloom_in_use()], g_bloom_off ? "" : " (the game's)");
 			}
-			if (runtime->is_key_pressed(g_key_light_star))
+			if (pressed(action_light_star))
 				toggle(g_light_star_off, "light star ray removal");
 		}
+		g_captured_now = false;
 
 		update_rates();
+	}
+
+	// ReShade's own shortcut that 's' is, by the name of its setting ([INPUT] in ReShade.ini: "key code,ctrl,shift,alt"), or
+	// null.
+	const char *reshade_shortcut(effect_runtime *runtime, const camfx::shortcut &s)
+	{
+		static const char *const keys[] = { "KeyOverlay", "KeyEffects", "KeyScreenshot", "KeyReload", "KeyNextPreset", "KeyPreviousPreset", "KeyPerformanceMode",
+			"KeyFPS", "KeyFrameTime" };
+		for (const char *const key : keys)
+		{
+			char value[64] = "";
+			size_t size = sizeof(value);
+			if (!reshade::get_config_value(runtime, "INPUT", key, value, &size))
+				continue;
+			unsigned code = 0, ctrl = 0, shift = 0, alt = 0;
+			if (sscanf_s(value, "%u,%u,%u,%u", &code, &ctrl, &shift, &alt) == 4 && camfx::shortcut { code, ctrl != 0, shift != 0, alt != 0 } == s)
+				return key;
+		}
+		return nullptr;
+	}
+
+	// While a shortcut is being set: the next key pressed, with the modifiers held, unless it is already a shortcut of this
+	// add-on or of ReShade. Esc cancels, Backspace removes the shortcut. The sim gets no keyboard input meanwhile.
+	std::string g_shortcut_message;
+
+	void capture_shortcut(effect_runtime *runtime)
+	{
+		if (g_capture == action_count)
+			return;
+		runtime->block_input_next_frame();
+		camfx::shortcut s;
+		if (runtime->is_key_pressed(VK_ESCAPE))
+		{
+			g_capture = action_count;
+			g_captured_now = true;
+			return;
+		}
+		if (!runtime->is_key_pressed(VK_BACK))
+		{
+			for (uint32_t key = VK_TAB; key <= 0xFE && s.key == 0; ++key)
+			{
+				const bool ignored = key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU || key == VK_ESCAPE || key == VK_LWIN || key == VK_RWIN ||
+					(key >= VK_LSHIFT && key <= VK_RMENU);
+				if (!ignored && runtime->is_key_pressed(key))
+					s.key = key;
+			}
+			if (s.key == 0)
+				return;
+			s.ctrl = runtime->is_key_down(VK_CONTROL);
+			s.shift = runtime->is_key_down(VK_SHIFT);
+			s.alt = runtime->is_key_down(VK_MENU);
+		}
+
+		const size_t i = g_capture;
+		g_capture = action_count;
+		g_captured_now = true;
+		const std::string text = camfx::shortcut_text(s);
+		static const char *const names[action_count] = { "the lens flare removal", "the bloom", "the star ray removal on lights" };
+		if (s.key != 0)
+		{
+			for (size_t j = 0; j < action_count; ++j)
+			{
+				if (j != i && g_shortcuts[j] == s)
+				{
+					g_shortcut_message = text + " is already the shortcut of " + names[j] + ", so it was not changed.";
+					return;
+				}
+			}
+			if (const char *const reshade = reshade_shortcut(runtime, s))
+			{
+				g_shortcut_message = text + " is ReShade's " + reshade + " shortcut, so it was not changed.";
+				return;
+			}
+		}
+		g_shortcuts[i] = s;
+		g_shortcut_message.clear();
+		save_settings();
+		log("shortcut of %s: %s", names[i], text.c_str());
+	}
+
+	// An option's label, with its shortcut if it has one. The ImGui ID stays the same when the shortcut changes.
+	std::string with_shortcut(const char *label, action a, const char *id)
+	{
+		const camfx::shortcut &s = g_shortcuts[a];
+		return std::string(label) + (s.key != 0 ? " (" + camfx::shortcut_text(s) + ")" : std::string()) + "###" + id;
 	}
 
 	// ---------------------------------------------------------------------------------------------
 	// Settings panel in the ReShade overlay (Add-ons tab)
 
-	void draw_overlay(effect_runtime *)
+	void draw_overlay(effect_runtime *runtime)
 	{
+		capture_shortcut(runtime);
+
 		bool value = g_sun_flare_off;
-		if (ImGui::Checkbox(("Remove the sun lens flare (Ctrl+Shift+" + key_name(g_key_flare) + ")").c_str(), &value))
+		if (ImGui::Checkbox(with_shortcut("Remove the sun lens flare", action_flare, "flare").c_str(), &value))
 			toggle(g_sun_flare_off, "lens flare removal");
 
 		// A slider over the offered percentages, from the smallest on the left to the game's on the right, showing the percentage
@@ -1304,7 +1444,7 @@ namespace
 		static const char *const strengths[dxil::bloom_strength_count] = { "100%% (the game's)", "75%%", "50%%", "25%%", "0%% (none)" };
 		static_assert(dxil::bloom_strengths[0] == 100 && dxil::bloom_strengths[1] == 75 && dxil::bloom_strengths[2] == 50 && dxil::bloom_strengths[3] == 25 && dxil::bloom_strengths[4] == 0);
 		uint32_t strength = bloom_in_use();
-		if (percent_slider(("Bloom and lens dirt (Ctrl+Shift+" + key_name(g_key_bloom) + ")").c_str(), strengths, dxil::bloom_strength_count, strength))
+		if (percent_slider(with_shortcut("Bloom and lens dirt", action_bloom, "bloom").c_str(), strengths, dxil::bloom_strength_count, strength))
 		{
 			g_bloom_strength = strength;
 			g_bloom_off = true;
@@ -1313,7 +1453,7 @@ namespace
 		}
 
 		value = g_light_star_off;
-		if (ImGui::Checkbox(("Remove the star rays on lights (Ctrl+Shift+" + key_name(g_key_light_star) + ")").c_str(), &value))
+		if (ImGui::Checkbox(with_shortcut("Remove the star rays on lights", action_light_star, "stars").c_str(), &value))
 			toggle(g_light_star_off, "light star ray removal");
 
 		// Size of the glow left around those lights
@@ -1322,6 +1462,28 @@ namespace
 		size_slider("Glow size around the lights", g_light_glow_size, "light glow size");
 		ImGui::EndDisabled();
 		ImGui::Unindent();
+
+		// Shortcuts: a button for each, which takes the next keys pressed.
+		if (ImGui::CollapsingHeader("Shortcuts"))
+		{
+			static const char *const shortcut_labels[action_count] = { "Lens flare removal on or off", "Bloom: the strength set or the game's", "Star ray removal on lights on or off" };
+			for (size_t i = 0; i < action_count; ++i)
+			{
+				ImGui::PushID(int(i));
+				const std::string text = g_capture == i ? std::string("Press the new keys...") : camfx::shortcut_text(g_shortcuts[i]);
+				if (ImGui::Button((text + "###key").c_str(), ImVec2(ImGui::GetFontSize() * 12, 0)))
+				{
+					g_capture = i;
+					g_shortcut_message.clear();
+				}
+				ImGui::SameLine();
+				ImGui::TextUnformatted(shortcut_labels[i]);
+				ImGui::PopID();
+			}
+			ImGui::TextDisabled("Click a shortcut, then press the new keys: a key, with any of Ctrl, Shift and Alt. Esc cancels, Backspace removes the shortcut.");
+			if (!g_shortcut_message.empty())
+				ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%s", g_shortcut_message.c_str());
+		}
 
 		ImGui::Separator();
 		ImGui::Text("Per second: %llu lens flare quads removed, %llu kept, %llu tonemap binds swapped", g_rates.flare_skipped, g_rates.flare_kept, g_rates.bloom_swapped);
@@ -1338,11 +1500,34 @@ namespace
 			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Star rays: %u light pipeline(s) left as they are (see the log)", g_starless_failed.load());
 		if (!g_dxc_unavailable && g_weaker_failed != 0)
 			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Bloom: %u tonemap pipeline(s) cannot have a weaker bloom (see the log)", g_weaker_failed.load());
+		// Tonemaps whose bloom cannot be removed at all: neither a twin from the package nor a rebuilt shader.
+		const uint32_t bloom_pipelines = g_pso_count[size_t(pso_kind::tonemap_bloom)].load(), removable = g_twin_count.load();
+		if (bloom_pipelines > removable)
+			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Bloom: %u tonemap pipeline(s) keep the game's bloom (see the log)", bloom_pipelines - removable);
 
-		if (g_twins_tried && !g_twins_ok)
-			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Bloom: the .twins file is missing or made for another sim version; rebuilt shaders remove the bloom instead (see the log)");
-		else if (g_twin_failed != 0)
-			ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Bloom: %u no-bloom tonemap pipeline(s) could not be created (see the log)", g_twin_failed.load());
+		// Why twins from the shader package are not used, as a note: the rebuilt shaders remove the bloom in their place.
+		const char *const instead = g_dxc_unavailable ? "" : "; rebuilt shaders remove the bloom instead";
+		switch (g_twins_state.load())
+		{
+		case twins_state::missing:
+			ImGui::TextDisabled("Bloom: no .twins file next to the add-on%s", instead);
+			break;
+		case twins_state::unreadable:
+			ImGui::TextDisabled("Bloom: the .twins file could not be read (see the log)%s", instead);
+			break;
+		case twins_state::no_package:
+			ImGui::TextDisabled("Bloom: the sim's shader package was not found (see the log)%s", instead);
+			break;
+		case twins_state::other_package:
+			ImGui::TextDisabled("Bloom: the .twins file is for another version of the sim's shaders%s", instead);
+			break;
+		default:
+			if (g_twin_differs != 0)
+				ImGui::TextDisabled("Bloom: %u tonemap(s) differ from the .twins file, made for another version of the sim's shaders%s", g_twin_differs.load(), instead);
+			if (g_twin_failed != 0)
+				ImGui::TextDisabled("Bloom: %u twin pipeline(s) from the shader package could not be created (see the log)%s", g_twin_failed.load(), instead);
+			break;
+		}
 
 		ImGui::Spacing();
 		if (ImGui::Button("Record a one-frame trace"))
@@ -1375,8 +1560,11 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 		GetModuleFileNameW(nullptr, exe, MAX_PATH);
 		log("MSFS 2024 Camera FX Off %s (built %s %s, ReShade API %d)", CAMFX_VERSION_STRING, __DATE__, __TIME__, RESHADE_API_VERSION);
 		log("host %S", file_name(exe).c_str());
-		log("settings: sun_flare_off=%d %s %s %s keys Ctrl+Shift+%s/%s/%s", int(g_sun_flare_off.load()), keep_text().c_str(),
-			bloom_text().c_str(), lights_text().c_str(), key_name(g_key_flare).c_str(), key_name(g_key_bloom).c_str(), key_name(g_key_light_star).c_str());
+		log("settings: sun_flare_off=%d %s %s %s keys %s/%s/%s", int(g_sun_flare_off.load()), keep_text().c_str(), bloom_text().c_str(), lights_text().c_str(),
+			camfx::shortcut_text(g_shortcuts[action_flare]).c_str(), camfx::shortcut_text(g_shortcuts[action_bloom]).c_str(),
+			camfx::shortcut_text(g_shortcuts[action_light_star]).c_str());
+		for (size_t at = 0, end; (end = g_settings_notes.find('\n', at)) != std::string::npos; at = end + 1)
+			log("%s", g_settings_notes.substr(at, end - at).c_str());
 
 		reshade::register_event<reshade::addon_event::init_pipeline>(on_init_pipeline);
 		reshade::register_event<reshade::addon_event::destroy_pipeline>(on_destroy_pipeline);

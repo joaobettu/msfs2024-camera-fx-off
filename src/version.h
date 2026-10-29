@@ -1,7 +1,7 @@
 #pragma once
 
 #define CAMFX_VERSION_MAJOR 1
-#define CAMFX_VERSION_MINOR 0
+#define CAMFX_VERSION_MINOR 1
 #define CAMFX_VERSION_PATCH 0
 
 #define CAMFX_STRINGIFY_(x) #x

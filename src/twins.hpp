@@ -149,9 +149,12 @@ namespace camfx
 		return true;
 	}
 
-	// Reads one shader container from the game's shader package and checks it is exactly the expected twin.
-	inline bool read_twin(const std::wstring &pak_path, const twin_entry &entry, std::vector<uint8_t> &out, std::string &error)
+	// Reads one shader container from the game's shader package and checks it is exactly the expected twin. 'differs', if
+	// given, tells a container that is not the twin (a package of another sim version) from a package that cannot be read.
+	inline bool read_twin(const std::wstring &pak_path, const twin_entry &entry, std::vector<uint8_t> &out, std::string &error, bool *differs = nullptr)
 	{
+		if (differs != nullptr)
+			*differs = false;
 		const HANDLE file = CreateFileW(pak_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 		if (file == INVALID_HANDLE_VALUE)
 			return error = "cannot open shader package (error " + std::to_string(GetLastError()) + ")", false;
@@ -168,7 +171,11 @@ namespace camfx
 		digest16 actual;
 		uint32_t container_size = 0;
 		if (!dxbc::digest(out.data(), out.size(), actual.bytes) || !dxbc::read_u32({ out.data(), out.size() }, 24, container_size) || container_size != entry.size || !(actual == entry.twin))
-			return error = "shader package content differs from the twins file (sim updated? run tools/gen_twins.ps1 again)", false;
+		{
+			if (differs != nullptr)
+				*differs = true;
+			return error = "the shader package holds something else where the .twins file has the twin: the .twins file is for another version of the sim's shaders", false;
+		}
 		return true;
 	}
 }

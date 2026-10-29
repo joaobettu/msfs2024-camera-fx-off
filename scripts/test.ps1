@@ -37,9 +37,12 @@ if ($LASTEXITCODE -ne 0) { $failed++ }
 
 foreach ($run in @(
     @('--sun-flare-off=1', '--bloom-off=1'),
-    @('--sun-flare-off=0', '--bloom-off=0', '--bloom-strength=25', '--light-star-off=0', '--light-glow-size=50'),
-    @('--sun-flare-off=1', '--bloom-off=1', '--bloom-strength=50', '--keep-glow=0', '--keep-star=1', '--keep-ghosts=1', '--flare-size=50', '--light-glow-size=100'),
-    @('--sun-flare-off=1', '--bloom-off=1', '--light-glow-size=25', "--real-pak=$pak", "--real-twins=$twins"))) {
+    @('--sun-flare-off=0', '--bloom-off=0', '--bloom-strength=25', '--light-star-off=0', '--light-glow-size=50', '--key-flare=ctrl+alt+p', '--key-bloom=75',
+      '--key-light-star=None'),
+    @('--sun-flare-off=1', '--bloom-off=1', '--bloom-strength=50', '--keep-glow=0', '--keep-star=1', '--keep-ghosts=1', '--flare-size=50', '--light-glow-size=100',
+      '--key-flare=Ctrl+Banana'),
+    @('--sun-flare-off=1', '--bloom-off=1', '--light-glow-size=25', "--real-pak=$pak", "--real-twins=$twins"),
+    @('--sun-flare-off=1', '--bloom-off=1', '--twins-other-package'))) {
   $arguments = @($adapter) + @($run) + @("--dxcompiler=$dxc")
   Write-Host "== fixture $($arguments -join ' ')"
   & "$build\fixture\fixture.exe" @arguments

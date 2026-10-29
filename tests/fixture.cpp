@@ -7,11 +7,17 @@
 //   fixture [--adapter=gpu] --pak-next-to-exe ...
 //       the stand-in shader package in a Shaders folder next to this executable and no pak_path in the settings: the
 //       add-on's default lookup, as players have it with the game
+//   fixture [--adapter=gpu] [--key-flare=Ctrl+Alt+P --key-bloom=75 --key-light-star=None] ...
+//       shortcuts in the settings, as text or as the key code of earlier versions; checks how the add-on read them
+//   fixture [--adapter=gpu] --twins-other-package ...
+//       a .twins file made for a shader package of another size (another sim version): the add-on must say so and remove
+//       the bloom with the shader it rebuilds
 //   fixture [--adapter=gpu] --real-pak=<SHADERSPAK.*.SM6.PC.PAK> --real-twins=<.twins> ...
 //       the game's shader package and twins file: also builds a pipeline from the game's own bloom tonemapping shader and
 //       checks the add-on creates the real no-bloom twin and its weaker bloom ones (pipelines only, never drawn)
 
 #include "../src/classify.hpp"
+#include "../src/shortcut.hpp"
 #include "../src/twins.hpp"
 
 #include <d3d12.h>
@@ -219,8 +225,11 @@ int wmain(int argc, wchar_t **argv)
 {
 	// Keep settings at -1 are left out of the .ini, so the add-on uses its defaults.
 	int sun_flare_off = 1, bloom_off = 1, bloom_strength = -1, keep_glow = -1, keep_star = -1, keep_ghosts = -1, flare_size = -1, light_star_off = -1, light_glow_size = -1;
-	bool gpu = false, pak_next_to_exe = false;
+	bool gpu = false, pak_next_to_exe = false, twins_other_package = false;
 	std::wstring real_pak, real_twins, dxcompiler;
+	// Shortcuts written in the settings, if any; empty: left out.
+	std::wstring keys[3];
+	static const wchar_t *const key_args[3] = { L"--key-flare=", L"--key-bloom=", L"--key-light-star=" };
 	for (int i = 1; i < argc; ++i)
 	{
 		const std::wstring arg = argv[i];
@@ -239,10 +248,15 @@ int wmain(int argc, wchar_t **argv)
 			gpu = true;
 		if (arg == L"--pak-next-to-exe")
 			pak_next_to_exe = true;
+		if (arg == L"--twins-other-package")
+			twins_other_package = true;
 		if (arg.rfind(L"--real-pak=", 0) == 0)
 			real_pak = arg.substr(11);
 		if (arg.rfind(L"--real-twins=", 0) == 0)
 			real_twins = arg.substr(13);
+		for (size_t k = 0; k < 3; ++k)
+			if (arg.rfind(key_args[k], 0) == 0)
+				keys[k] = arg.substr(wcslen(key_args[k]));
 	}
 	const bool real = !real_pak.empty();
 	// What the add-on should use: only the glow of the lens flare is kept by default.
@@ -285,7 +299,8 @@ int wmain(int argc, wchar_t **argv)
 		pak.insert(pak.end(), g_ps_tonemap_plain, g_ps_tonemap_plain + container_size(g_ps_tonemap_plain));
 		pak.insert(pak.end(), 100, 0xCD);
 		require(write_file(pak_path, pak.data(), pak.size()) ? S_OK : E_FAIL, "write fixture.pak");
-		twins = "# fixture\npak fixture.pak " + std::to_string(pak.size()) + "\n" +
+		// The package of another sim version: 43 bytes larger, as the Sim Update 7.1 beta's was smaller than the release's.
+		twins = "# fixture\npak fixture.pak " + std::to_string(pak.size() + (twins_other_package ? 43 : 0)) + "\n" +
 			digest_hex(g_ps_tonemap_bloom) + " " + digest_hex(g_ps_tonemap_plain) + " " + std::to_string(twin_offset) + " " + std::to_string(container_size(g_ps_tonemap_plain)) + "\n";
 	}
 	require(write_file(dir + L"msfs2024-camera-fx-off.twins", twins.data(), twins.size()) ? S_OK : E_FAIL, "write .twins");
@@ -312,6 +327,10 @@ int wmain(int argc, wchar_t **argv)
 	// The add-on looks for the sim's dxcompiler.dll next to the executable; here, a copy of it is elsewhere.
 	if (!dxcompiler.empty())
 		ini += "dxcompiler_path=" + narrow(dxcompiler) + "\r\n";
+	static const char *const key_names[3] = { "key_flare", "key_bloom", "key_light_star" };
+	for (size_t k = 0; k < 3; ++k)
+		if (!keys[k].empty())
+			ini += std::string(key_names[k]) + "=" + narrow(keys[k]) + "\r\n";
 	require(write_file(dir + L"msfs2024-camera-fx-off.ini", ini.data(), ini.size()) ? S_OK : E_FAIL, "write .ini");
 	DeleteFileW((dir + L"msfs2024-camera-fx-off.log").c_str());
 
@@ -803,7 +822,7 @@ int wmain(int argc, wchar_t **argv)
 		// shader it rebuilt instead.
 		check(tonemap_is(0), "tonemapping permutation without a twin drawn without bloom, by the rebuilt shader");
 		check(log.find("no pair for tonemapping variant " + digest_hex(g_ps_tonemap_bloom)) != std::string::npos &&
-			log.find("bloom: tonemapping " + digest_hex(g_ps_tonemap_bloom) + " has no twin in the shader package; the rebuilt shader removes its bloom") != std::string::npos,
+			log.find("bloom: tonemapping " + digest_hex(g_ps_tonemap_bloom) + " has no usable twin in the shader package; the rebuilt shader removes its bloom") != std::string::npos,
 			"add-on reported the permutation without a twin, and removed its bloom with the rebuilt shader");
 
 		camfx::digest16 bloom_digest;
@@ -836,11 +855,22 @@ int wmain(int argc, wchar_t **argv)
 	else
 	{
 		const bool rebuilt_bloom = !dxcompiler.empty();
-		// Without the game's dxcompiler.dll, only no bloom (the package's twin) or the game's bloom are possible.
-		const int drawn_at = strength == 0 || rebuilt_bloom ? strength : 100;
-		check(tonemap_is(drawn_at), drawn_at == 0 ? "tonemapping ran the no-bloom twin read from the package" : drawn_at == 100 ? "tonemapping kept the bloom permutation" :
+		// Without the game's dxcompiler.dll, only no bloom (the package's twin, if the .twins file fits) or the game's bloom
+		// are possible.
+		const int drawn_at = (strength == 0 && !twins_other_package) || rebuilt_bloom ? strength : 100;
+		check(tonemap_is(drawn_at), drawn_at == 100 ? std::string("tonemapping kept the bloom permutation") :
+			drawn_at == 0 && !twins_other_package ? std::string("tonemapping ran the no-bloom twin read from the package") :
 			"tonemapping ran the stand-in rebuilt with the bloom at " + std::to_string(drawn_at) + "%");
-		check(log.find("uses no-bloom twin") != std::string::npos, "add-on paired the bloom permutation with its twin");
+		if (twins_other_package)
+		{
+			check(log.find("the .twins file is for another version of the sim's shaders") != std::string::npos && log.find("uses no-bloom twin") == std::string::npos &&
+				log.find("bloom: tonemapping " + digest_hex(g_ps_tonemap_bloom) + " has no usable twin in the shader package; the rebuilt shader removes its bloom") != std::string::npos,
+				"add-on said the .twins file is for another sim version, and removed the bloom with the rebuilt shader");
+		}
+		else
+		{
+			check(log.find("uses no-bloom twin") != std::string::npos, "add-on paired the bloom permutation with its twin");
+		}
 		if (rebuilt_bloom)
 		{
 			check(log.find("bloom: ph_tonemapping " + digest_hex(g_ps_tonemap_bloom) + " rebuilt with weaker bloom, strengths 75/50/25/0%") != std::string::npos,
@@ -866,10 +896,27 @@ int wmain(int argc, wchar_t **argv)
 	// People attach the log to public bug reports: it names files only, never the folders they are in.
 	check(log.find(":\\") == std::string::npos && log.find(":/") == std::string::npos, "the log names no folders");
 
-	char settings[224];
-	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d flare_size=%d bloom_off=%d bloom_strength=%d light_star_off=%d light_glow_size=%d keys Ctrl+Shift+F5/F6/F7\r\n",
-		sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept), quad_size, bloom_off, strength_set, int(stars_removed), glow_size);
-	check(log.find(settings) != std::string::npos, "add-on read the settings (only the lens flare glow kept, at 50%, and no bloom, unless set otherwise; shortcuts F5, F6 and F7)");
+	// Shortcuts: Ctrl+Shift+F5, F6 and F7 unless set, and also when what is set cannot be read (which the log tells).
+	static const camfx::shortcut default_keys[3] = { { 0x74, true, true, false }, { 0x75, true, true, false }, { 0x76, true, true, false } };
+	std::string key_texts[3];
+	bool keys_ok = true;
+	for (size_t k = 0; k < 3; ++k)
+	{
+		camfx::shortcut read = default_keys[k];
+		const bool understood = keys[k].empty() || camfx::parse_shortcut(narrow(keys[k]), read);
+		if (!understood)
+		{
+			read = default_keys[k];
+			keys_ok &= log.find("settings: " + std::string(key_names[k]) + "=" + narrow(keys[k]) + " not understood, so " + camfx::shortcut_text(read) + " is used") != std::string::npos;
+		}
+		key_texts[k] = camfx::shortcut_text(read);
+	}
+	char settings[320];
+	snprintf(settings, sizeof(settings), "settings: sun_flare_off=%d keep_glow=%d keep_star=%d keep_ghosts=%d flare_size=%d bloom_off=%d bloom_strength=%d light_star_off=%d light_glow_size=%d keys %s/%s/%s\r\n",
+		sun_flare_off, int(glow_kept), int(star_kept), int(ghosts_kept), quad_size, bloom_off, strength_set, int(stars_removed), glow_size, key_texts[0].c_str(), key_texts[1].c_str(),
+		key_texts[2].c_str());
+	check(log.find(settings) != std::string::npos && keys_ok, "add-on read the settings (only the lens flare glow kept, at 50%, and no bloom, unless set otherwise; shortcuts " +
+		key_texts[0] + ", " + key_texts[1] + " and " + key_texts[2] + ")");
 	// The stand-in elements are not in the add-on's table of known shaders, so it goes by draw order.
 	const auto element = [&](const unsigned char *ps, const char *part) {
 		const std::string line = log_line(log, "VS:vh_base#" + digest_hex(g_vs_flare_quad).substr(0, 8) + " PS:ph_base#" + digest_hex(ps).substr(0, 8) + " has shaders this version does not know");

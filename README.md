@@ -53,13 +53,15 @@ To uninstall, delete those files and the ones the add-on creates next to them (`
 
 ## Usage
 
-| Shortcut | Action |
+| Shortcut (default) | Action |
 |---|---|
 | Ctrl+Shift+F5 | turns the lens flare removal on or off |
 | Ctrl+Shift+F6 | switches between the bloom strength set in the overlay (none by default) and the game's bloom |
 | Ctrl+Shift+F7 | turns the star ray removal on lights on or off |
 
 The same options are in the ReShade overlay, **Add-ons** tab, along with counters per second. The overlay also has the **Record a one-frame trace** button, which writes `msfs2024-camera-fx-off.trace.txt` for bug reports.
+
+To change a shortcut, open **Shortcuts** in the overlay, click the shortcut, and press the new keys: a key, with any of Ctrl, Shift and Alt. Esc cancels, and Backspace leaves the option without a shortcut. A combination that is already a shortcut of the add-on or of ReShade (such as the key that opens its overlay) is not taken. The add-on cannot see the shortcuts of other add-ons: by default, Glass Cockpit DLSS Fix uses F9 to F12.
 
 ### Keeping part of the lens flare
 
@@ -105,7 +107,7 @@ Your choices are saved in `msfs2024-camera-fx-off.ini`, next to the add-on, in t
 | `bloom_strength` | `0` | strength of the bloom and lens dirt, in percent of the game's: `0` (none), `25`, `50`, `75` or `100` |
 | `light_star_off` | `1` | remove the star rays on lights |
 | `light_glow_size` | `50` | size of the glow left around lights, in percent of the game's: `100`, `75`, `50` or `25` |
-| `key_flare`, `key_bloom`, `key_light_star` | `116`, `117`, `118` (F5, F6, F7) | shortcut keys, pressed with Ctrl+Shift, as Windows virtual-key codes |
+| `key_flare`, `key_bloom`, `key_light_star` | `Ctrl+Shift+F5`, `Ctrl+Shift+F6`, `Ctrl+Shift+F7` | shortcuts: a key with any of `Ctrl`, `Shift` and `Alt`, such as `Ctrl+Alt+P`, or `None`. Keys other than letters, digits, F1 to F24 and a few named ones (`Home`, `NumAdd`...) are written as their Windows key code (`0xBA`). A plain number, as earlier versions stored them, is that key code with Ctrl+Shift |
 | `pak_path` | (empty) | full path of the game's `SHADERSPAK.*.SM6.PC.PAK`, if it is not in the `Shaders` folder next to the game executable |
 | `dxcompiler_path` | (empty) | full path of the game's `Dxcompiler.DLL`, if it is not next to the game executable |
 
@@ -135,7 +137,7 @@ The lens flare is recognized from the context of each draw, not by shader hash, 
 
 Its three parts, though, are told apart by their shaders. If an update changes those shaders, the add-on falls back to the order the engine draws them in: the glow first, then the star rays, then the ghosts. The log says when that happens ("has shaders this version does not know"). If the parts come out wrong after an update, please open an issue.
 
-The bloom removal uses a table of pairs made for the current shader package. If the sim updates, the log and the overlay say so, and the add-on removes the bloom with the tonemapping shaders it rebuilds instead (see "How it works"). To regenerate the table, run this from the source folder:
+The bloom removal uses a table of pairs made for the current shader package. If the sim updates, the log says so, and the add-on removes the bloom with the tonemapping shaders it rebuilds instead (see "How it works"). The overlay then shows a gray note, such as "the .twins file is for another version of the sim's shaders": the bloom is still removed, and a later version of the add-on brings a matching table. An orange warning only appears when some bloom cannot be removed or weakened. To regenerate the table, run this from the source folder:
 
 ```
 powershell -ExecutionPolicy Bypass -File tools\gen_twins.ps1
@@ -218,7 +220,8 @@ What the tests cover:
   - the same quad with depth bound, and a 3-vertex draw, are kept;
   - the lights are kept, even with the old diagnostic keys in the settings;
   - the light glow stand-ins, for city and for aircraft lights, lose their star rays, and their glow and far-light disc shrink with the glow size; with the option off they are drawn as they are;
-  - the tonemap stand-in, built like the game's bloom tonemaps, is swapped for its twin, or drawn rebuilt at the bloom strength set.
+  - the tonemap stand-in, built like the game's bloom tonemaps, is swapped for its twin, or drawn rebuilt at the bloom strength set;
+  - with a `.twins` made for a shader package of another size (another sim version), the add-on says so and removes the bloom with the rebuilt shader.
 - An extra `fixture` run builds pipelines from the game's own shaders, taken from its package: the bloom tonemap, the light glow and light flare shaders, and the lens flare quad vertex shaders. It checks that the add-on creates the real no-bloom twin and rebuilds every one of those shaders at every size or strength, and that the device accepts them all. Those pipelines are only compiled, never drawn. The tonemap stand-in has no twin in the game's table there, so its bloom must be removed by the rebuilt shader.
 - `scripts\test.ps1 -Gpu` runs the `fixture` on the graphics card. While the sim is running, it only does so with `-Force`.
 
